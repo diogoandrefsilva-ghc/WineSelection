@@ -91,6 +91,18 @@ Junta duas técnicas já usadas noutras apps do mesmo projeto:
 - Secrets: usa o `GEMINI_API_KEY` **já existente no projecto** (partilhado
   com as outras funções — secrets de Edge Function são por projecto, não por
   função). Não precisa de nenhum secret novo.
+- **Duas chamadas ao Gemini, não uma**: a primeira (imagens + pesquisa) só
+  devolve `sugestoes` e `vinhosCarta` sem pontuação aproximada — é a que fica
+  presa se lhe pedires demasiado. `pontuacaoAprox` de cada vinho da carta
+  vem de uma SEGUNDA chamada, `pedirPontuacoesAprox`, só texto (os nomes já
+  lidos), sem imagens nem pesquisa, com o seu próprio limite de 15s à parte
+  do timeout geral. Tentar pedir as duas coisas na mesma chamada (imagens +
+  pesquisa + estimar ~20-40 vinhos um a um) esgotava sempre o tempo
+  disponível, mesmo com `thinkingBudget:0` — visto nos logs (`query_logs` do
+  Supabase, `function_logs`): o fetch ao Gemini nunca chegava a responder.
+  Se a segunda chamada falhar ou passar do limite, a resposta principal
+  segue à mesma, só sem `pontuacaoAprox` (fica `null`) — nunca deita tudo
+  abaixo por isto.
 
 ## Contrato do pedido e da resposta (o que `app.js` envia/espera)
 Pedido: `{imagens:[{data,mime}], prato, orcamento}` — `orcamento` é o preço

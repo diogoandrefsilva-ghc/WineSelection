@@ -122,7 +122,7 @@ Devolve APENAS um objeto JSON com esta forma exata:
     "faixaMercado": string|null, "comentario": string},
   "combinacao": string}],
  "vinhosCarta": [{"nome": string, "tipo": "Tinto"|"Branco"|"Rosé"|"Verde"|"Espumante"|"Doce"|"Outro"|null,
-  "regiao": string|null, "preco": number|null, "pontuacaoAprox": number|null}],
+  "regiao": string|null, "preco": number|null}],
  "aviso": string|null}
 
 Regras:
@@ -143,12 +143,6 @@ Regras:
   (Tinto/Branco/Rosé/Verde/Espumante/Doce/Outro) — é o que permite distinguir
   brancos de tintos na lista; usa null só se a carta não deixar perceber nem
   isso.
-- "vinhosCarta[].pontuacaoAprox": para CADA vinho da lista (não só as
-  sugestões), a tua estimativa geral de 0 a 5 (ex.: 3.8) com base no que já
-  sabes sobre ele — NÃO precisas de pesquisar um a um, é só uma referência
-  aproximada para o utilizador comparar a carta toda de relance. null se não
-  reconheceres o vinho de todo. Isto é diferente da "pontuacao" das
-  sugestões, que essa sim tem de vir de pesquisa confirmada.
 - "aviso": preenche só se a foto estiver ilegível, sem vinhos, ou sem preços
   visíveis — caso contrário null.
 - Nunca inventes preços — usa null na dúvida.
@@ -242,8 +236,65 @@ function normVinhoCarta(raw: unknown): Record<string, unknown> | null {
     tipo: TIPOS.includes(o.tipo) ? o.tipo : null,
     regiao: o.regiao ? s(o.regiao, 60) : null,
     preco: numOrNull(o.preco, 0, 5000),
-    pontuacaoAprox: numOrNull(o.pontuacaoAprox, 0, 5),
+    pontuacaoAprox: null as number | null, // preenchido depois por pedirPontuacoesAprox()
   };
+}
+
+/* Segunda chamada, leve e SEM imagens nem pesquisa — só texto com os nomes já
+   lidos na primeira. É o que permite dar uma pontuação aproximada a TODA a
+   carta (não só as sugestões) sem repetir o custo caro de ler imagens +
+   grounding por cada um dos até 40 vinhos: isso, tentado numa única chamada,
+   estourava sempre o tempo disponível (visto nos logs — nem "thinking"
+   desligado chegava). Corre com um limite de tempo próprio, curto, e nunca
+   derruba a resposta principal se falhar — fica só sem pontuação aproximada. */
+async function pedirPontuacoesAprox(
+  nomes: string[],
+  model: string,
+  parentSignal: AbortSignal,
+): Promise<(number | null)[]> {
+  const vazio = () => nomes.map(() => null);
+  if (!nomes.length) return [];
+  const lista = nomes.map((n, i) => `${i + 1}. ${n}`).join("\n");
+  const texto = `Para cada um destes vinhos, dá a tua estimativa geral de
+pontuação (0 a 5, com casas decimais, ex.: 3.8) com base no que já sabes —
+NÃO precisas de pesquisar nada, é só memória. Usa null se não reconheceres
+o vinho de todo.
+
+${lista}
+
+Devolve APENAS um array JSON com ${nomes.length} números (ou null), na
+MESMA ordem da lista acima — nada mais, sem texto à volta.`;
+
+  const ctrl2 = new AbortController();
+  const onAbort = () => ctrl2.abort();
+  parentSignal.addEventListener("abort", onAbort);
+  const subTimer = setTimeout(() => ctrl2.abort(), 15_000);
+  try {
+    const r = await fetch(`${GAPI}/models/${model}:generateContent?key=${GEMINI_KEY}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: ctrl2.signal,
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: texto }] }],
+        generationConfig: {
+          temperature: 0,
+          response_mime_type: "application/json",
+          thinkingConfig: { thinkingBudget: 0 },
+        },
+      }),
+    });
+    if (!r.ok) return vazio();
+    const d = await r.json();
+    const txt = (d?.candidates?.[0]?.content?.parts ?? []).map((p: any) => p?.text ?? "").join("");
+    const arr = extrairJson(txt);
+    if (!Array.isArray(arr)) return vazio();
+    return nomes.map((_, i) => numOrNull(arr[i], 0, 5));
+  } catch (_) {
+    return vazio();
+  } finally {
+    clearTimeout(subTimer);
+    parentSignal.removeEventListener("abort", onAbort);
+  }
 }
 
 async function emailAutorizado(auth: string, signal: AbortSignal): Promise<{ ok: boolean; email: string | null }> {
@@ -431,8 +482,19 @@ Deno.serve(async (req) => {
     const sugestoes = (Array.isArray(parsed.sugestoes) ? parsed.sugestoes : [])
       .map(normSugestao).filter(Boolean).slice(0, 5);
     const vinhosCarta = (Array.isArray(parsed.vinhosCarta) ? parsed.vinhosCarta : [])
-      .map(normVinhoCarta).filter(Boolean).slice(0, 60);
+      .map(normVinhoCarta).filter(Boolean).slice(0, 60) as Record<string, unknown>[];
     const aviso = parsed.aviso ? s(parsed.aviso, 200) : null;
+
+    // Chamada leve à parte, só texto — nunca falha a resposta principal (ver
+    // pedirPontuacoesAprox), só fica sem pontuação aproximada se correr mal.
+    if (vinhosCarta.length && !ctrl.signal.aborted) {
+      const pontuacoes = await pedirPontuacoesAprox(
+        vinhosCarta.map((v) => String(v.nome)),
+        model,
+        ctrl.signal,
+      );
+      vinhosCarta.forEach((v, i) => { v.pontuacaoAprox = pontuacoes[i] ?? null; });
+    }
 
     const fontes: { titulo: string; url: string }[] = [];
     (cand?.groundingMetadata?.groundingChunks ?? []).forEach((c: any) => {
@@ -446,6 +508,7 @@ Deno.serve(async (req) => {
     await registar("ok", {
       sugestoes: sugestoes.length, vinhos_carta: vinhosCarta.length, modelo: model,
       pesquisa: comPesquisa, prato: pratoLimpo, fotos: imagens.length, orcamento: orcamentoNum,
+      pontuacoes_aprox: vinhosCarta.filter((v) => v.pontuacaoAprox != null).length,
       fontes: fontes.map((f) => f.url).slice(0, 8),
     }, quem);
 
