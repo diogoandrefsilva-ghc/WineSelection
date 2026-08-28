@@ -281,6 +281,12 @@ let _wsPollInicio=0;
 const WS_POLL_INTERVALO_MS=3000;
 const WS_POLL_MAX_MS=3*60*1000; // desiste de sondar ao fim de 3 minutos
 
+/* Verificação "a sério" de vinhos escolhidos à mão na lista da carta — ver
+   comentário em wsVerificar() mais abaixo. */
+const _wsVerifSel={};          // {analiseId: Set(nome)}
+const _wsVinhosPorAnalise={};  // {analiseId: vinhosCarta[]} — para saber tipo/região/preço do que foi escolhido
+const _wsVerifPolls={};        // {analiseId: {timer, inicio}}
+
 async function wsSugerir(){
   if(!_wsImagens.length){toast('Escolhe primeiro uma foto da carta',1);return;}
   const prato=document.getElementById('in-prato').value.trim();
@@ -337,7 +343,7 @@ async function wsPollTick(id){
     if(row.estado==='concluido'){
       wsPollTerminar();
       if(status)status.style.display='none';
-      document.getElementById('resultado-box').innerHTML=wsResultadoHTML(row.resultado||{});
+      document.getElementById('resultado-box').innerHTML=wsResultadoHTML(row.resultado||{},{analiseId:row.id});
       return;
     }
     if(row.estado==='erro'){
@@ -359,12 +365,20 @@ function wsPollTerminar(){
 
 // Ao voltar a ficar visível (troca de app, ecrã desbloqueado), sonda já em
 // vez de esperar pelo próximo tick — resposta mais rápida ao regressar.
+// Cobre as duas sondagens: a análise principal E qualquer verificação de
+// vinhos a decorrer (mesmo problema de fundo — um setTimeout não sobrevive
+// ao telemóvel suspender a app).
 document.addEventListener('visibilitychange',()=>{
-  if(document.visibilityState==='visible'&&_wsPollTimer){
+  if(document.visibilityState!=='visible')return;
+  if(_wsPollTimer){
     let id=null;
     try{id=localStorage.getItem(WS_PENDENTE_KEY);}catch(e){}
     if(id){clearTimeout(_wsPollTimer);wsPollTick(id);}
   }
+  Object.keys(_wsVerifPolls).forEach(aid=>{
+    const p=_wsVerifPolls[aid];
+    if(p){clearTimeout(p.timer);wsVerifPollTick(aid,p.inicio);}
+  });
 });
 
 // Retoma uma análise que ficou a meio (ex.: recarregou a página) — chamado
@@ -433,24 +447,155 @@ function wsVinhoCardHTML(v,destaque){
   </div>`;
 }
 
-function wsResultadoHTML(d){
+function wsResultadoHTML(d,opts){
+  opts=opts||{};
+  const analiseId=opts.analiseId;
+  const podeVerificar=analiseId!=null;
   const sug=Array.isArray(d.sugestoes)?d.sugestoes:[];
   if(!sug.length){
     return `<div class="ws-card"><p class="ws-note">${esc(d.aviso||'Não encontrei sugestões claras nesta carta — tenta uma foto mais nítida.')}</p></div>`;
   }
   let html=sug.map((v,i)=>wsVinhoCardHTML(v,i===0)).join('');
   if(Array.isArray(d.vinhosCarta)&&d.vinhosCarta.length){
+    if(podeVerificar)_wsVinhosPorAnalise[analiseId]=d.vinhosCarta;
     html+=`<div class="ws-card">
       <div class="ws-card-label">Vinhos lidos na carta (${d.vinhosCarta.length})</div>
-      <p class="ws-note" style="margin-top:-4px">Pontuação aproximada, sem pesquisa vinho a vinho — só as sugestões acima têm fonte confirmada.</p>
+      <p class="ws-note" style="margin-top:-4px">Pontuação aproximada, sem pesquisa vinho a vinho — só as sugestões acima têm fonte confirmada${podeVerificar?'. Escolhe até 5 para uma pesquisa a sério:':'.'}</p>
       ${wsLegendaTipos(d.vinhosCarta)}
-      <div class="carta-list">${d.vinhosCarta.map(v=>`<div class="carta-item"><span class="tipo-dot" style="background:${wsTipoCor(v.tipo)}" title="${esc(v.tipo||'Tipo desconhecido')}"></span><span class="carta-nome">${esc(v.nome||'')}</span><span class="carta-score">${v.pontuacaoAprox!=null?('⭐ '+Number(v.pontuacaoAprox).toFixed(1)):'—'}</span><span class="carta-preco">${fmtEur(v.preco)}</span></div>`).join('')}</div>
+      <div class="carta-list">${d.vinhosCarta.map(v=>`<div class="carta-item">
+        ${podeVerificar?`<input type="checkbox" class="carta-check" data-analise="${analiseId}" data-nome="${esc(v.nome)}" onchange="wsVerifToggle(this)">`:''}
+        <span class="tipo-dot" style="background:${wsTipoCor(v.tipo)}" title="${esc(v.tipo||'Tipo desconhecido')}"></span>
+        <span class="carta-nome">${esc(v.nome||'')}</span>
+        <span class="carta-score">${v.pontuacaoAprox!=null?('⭐ '+Number(v.pontuacaoAprox).toFixed(1)):'—'}</span>
+        <span class="carta-preco">${fmtEur(v.preco)}</span>
+      </div>`).join('')}</div>
+      ${podeVerificar?`<div class="verif-bar">
+        <button type="button" class="btn-n" id="btn-verificar-${analiseId}" onclick="wsVerificar(${analiseId})" disabled>🔍 Verificar selecionados (<span id="verif-count-${analiseId}">0</span>)</button>
+        <div id="verif-status-${analiseId}" class="ws-note" style="display:none"></div>
+      </div>
+      <div id="verif-resultado-${analiseId}"></div>`:''}
     </div>`;
   }
   if(Array.isArray(d.fontes)&&d.fontes.length){
     html+=`<div class="ws-fontes">Fontes: ${d.fontes.map(f=>`<a href="${esc(f.url)}" target="_blank" rel="noopener">${esc(f.titulo||f.url)}</a>`).join(' · ')}</div>`;
   }
   return html;
+}
+
+/* ── VERIFICAÇÃO A SÉRIO (até 5 vinhos escolhidos na lista) ──
+   O resto da lista (`vinhosCarta`) só tem pontuacaoAprox — uma estimativa
+   de memória do Gemini, sem pesquisa (ver sugerir-vinho.ts). Pedir pesquisa
+   real para os ~40 vinhos todos é que causava os timeouts que já
+   corrigimos; isto dá a opção de pesquisa real, mas só para os que o
+   utilizador escolher — chama a Edge Function `verificar-vinhos`, que mexe
+   na mesma linha de `analises` (colunas verificacao_estado/verificacao),
+   com o mesmo padrão assíncrono + polling da análise principal. */
+const WS_VERIF_MAX=5;
+
+function wsVerifToggle(el){
+  const aid=el.dataset.analise,nome=el.dataset.nome;
+  if(!_wsVerifSel[aid])_wsVerifSel[aid]=new Set();
+  const sel=_wsVerifSel[aid];
+  if(el.checked){
+    if(sel.size>=WS_VERIF_MAX){el.checked=false;toast('Escolhe no máximo '+WS_VERIF_MAX+' vinhos',1);return;}
+    sel.add(nome);
+  }else{
+    sel.delete(nome);
+  }
+  const cnt=document.getElementById('verif-count-'+aid);
+  if(cnt)cnt.textContent=sel.size;
+  const btn=document.getElementById('btn-verificar-'+aid);
+  if(btn)btn.disabled=sel.size===0;
+}
+
+async function wsVerificar(analiseId){
+  const sel=_wsVerifSel[analiseId];
+  if(!sel||!sel.size)return;
+  const todos=_wsVinhosPorAnalise[analiseId]||[];
+  const vinhos=todos.filter(v=>sel.has(v.nome)).map(v=>({nome:v.nome,regiao:v.regiao||null,preco:v.preco!=null?v.preco:null}));
+  if(!vinhos.length)return;
+  const btn=document.getElementById('btn-verificar-'+analiseId);
+  const status=document.getElementById('verif-status-'+analiseId);
+  if(btn)btn.disabled=true;
+  if(status){status.style.display='block';status.style.color='var(--mu)';status.textContent='A pesquisar pontuações e preços reais — pode demorar um pouco…';}
+  try{
+    const r=await sbFetch(`${SB_URL}/functions/v1/verificar-vinhos`,{
+      method:'POST',
+      headers:{'Content-Type':'application/json','apikey':SB_KEY},
+      body:JSON.stringify({analiseId,vinhos})
+    });
+    let d={};try{d=await r.json();}catch(_){}
+    if(!r.ok){
+      if(status){status.style.color='var(--dg)';status.textContent=d.error||('Erro HTTP '+r.status+' — tenta outra vez.');}
+      if(btn)btn.disabled=false;
+      return;
+    }
+    wsVerifIniciarPolling(analiseId);
+  }catch(e){
+    if(status){status.style.color='var(--dg)';status.textContent='Erro de ligação — tenta outra vez.';}
+    if(btn)btn.disabled=false;
+  }
+}
+
+function wsVerifIniciarPolling(analiseId){
+  const inicio=Date.now();
+  const p=_wsVerifPolls[analiseId]||{};
+  clearTimeout(p.timer);
+  _wsVerifPolls[analiseId]={timer:null,inicio};
+  wsVerifPollTick(analiseId,inicio);
+}
+
+async function wsVerifPollTick(analiseId,inicio){
+  const status=document.getElementById('verif-status-'+analiseId);
+  if(Date.now()-inicio>WS_POLL_MAX_MS){
+    delete _wsVerifPolls[analiseId];
+    if(status){status.style.color='var(--dg)';status.textContent='Está a demorar demasiado — tenta outra vez.';}
+    const btn=document.getElementById('btn-verificar-'+analiseId);
+    if(btn)btn.disabled=false;
+    return;
+  }
+  try{
+    const rows=await sbReq('GET',`analises?id=eq.${analiseId}&select=id,verificacao_estado,verificacao,verificacao_erro`);
+    const row=rows&&rows[0];
+    if(row&&row.verificacao_estado==='concluido'){
+      delete _wsVerifPolls[analiseId];
+      wsVerifRenderResultado(analiseId,row.verificacao||[]);
+      return;
+    }
+    if(row&&row.verificacao_estado==='erro'){
+      delete _wsVerifPolls[analiseId];
+      if(status){status.style.color='var(--dg)';status.textContent=row.verificacao_erro||'Não consegui verificar — tenta outra vez.';}
+      const btn=document.getElementById('btn-verificar-'+analiseId);
+      if(btn)btn.disabled=false;
+      return;
+    }
+  }catch(e){ /* falha transitória de rede — tenta outra vez no próximo tick */ }
+  if(_wsVerifPolls[analiseId]){
+    _wsVerifPolls[analiseId].timer=setTimeout(()=>wsVerifPollTick(analiseId,inicio),WS_POLL_INTERVALO_MS);
+  }
+}
+
+function wsVerifCardHTML(v){
+  const pi=PRECO_INFO[(v.precoAvaliacao&&v.precoAvaliacao.classificacao)||'desconhecido']||PRECO_INFO.desconhecido;
+  return `<div class="vinho-card verif-card">
+    <div class="vinho-nome">${esc(v.nome||'')}</div>
+    ${wsPontuacaoHTML(v.pontuacao)}
+    <div class="preco-badge ${pi.cls}">${pi.txt}${v.precoAvaliacao&&v.precoAvaliacao.faixaMercado?` · ref. ${esc(v.precoAvaliacao.faixaMercado)}`:''}</div>
+    ${v.precoAvaliacao&&v.precoAvaliacao.comentario?`<p class="vinho-txt">${esc(v.precoAvaliacao.comentario)}</p>`:''}
+  </div>`;
+}
+
+function wsVerifRenderResultado(analiseId,verificacao){
+  const status=document.getElementById('verif-status-'+analiseId);
+  if(status)status.style.display='none';
+  const mount=document.getElementById('verif-resultado-'+analiseId);
+  if(mount){
+    mount.innerHTML=(Array.isArray(verificacao)&&verificacao.length)
+      ?`<div class="ws-card-label" style="margin-top:14px">Verificação pedida</div>${verificacao.map(wsVerifCardHTML).join('')}`
+      :`<p class="ws-note">Não consegui confirmar estes vinhos — tenta outra vez.</p>`;
+  }
+  const btn=document.getElementById('btn-verificar-'+analiseId);
+  if(btn){btn.disabled=false;btn.textContent='🔍 Verificar de novo';}
 }
 
 /* ── HISTÓRICO ─────────────────────────────── */
@@ -475,7 +620,7 @@ function wsHistItemHTML(r){
   const dataFmt=isNaN(data)?'':data.toLocaleDateString('pt-PT',{day:'2-digit',month:'short',year:'numeric'});
   const topTxt=r.estado==='pendente'?'⏳ a analisar…':r.estado==='erro'?'⚠️ falhou':(top?('🍷 '+esc(top.nome)):'sem sugestões');
   const corpo=r.estado==='concluido'
-    ?wsResultadoHTML(r.resultado||{})
+    ?wsResultadoHTML(r.resultado||{},{analiseId:r.id})
     :r.estado==='erro'
       ?`<p class="ws-note" style="color:var(--dg)">${esc(r.erro||'Falhou — tenta outra vez.')}</p>`
       :'<p class="ws-note">Ainda a analisar — atualiza esta lista daqui a pouco.</p>';

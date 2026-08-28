@@ -22,6 +22,9 @@ isolado: `wineselection`.
   Supabase). Fonte de verdade do schema `wineselection`.
 - `sugerir-vinho.ts` — Edge Function (Deno), na raiz do repo, deploy à parte
   com `supabase functions deploy sugerir-vinho` (ou via MCP do Supabase).
+- `verificar-vinhos.ts` — Edge Function irmã, verificação a sério (pesquisa
+  Google real) para até 5 vinhos escolhidos à mão na lista completa da
+  carta. Ver "A Edge Function `verificar-vinhos`" abaixo.
 - `apple-touch-icon.png` / `icon-512.png` — gerados por um script Node
   descartável (encoder PNG à mão, sem dependências); não há fonte vetorial
   guardada no repo. Para os refazer/alterar, escreve outro script assim.
@@ -120,6 +123,42 @@ Junta duas técnicas já usadas noutras apps do mesmo projeto:
   a deixa presa em `'pendente'`. O `WHERE` do PATCH inclui sempre
   `user_email=eq.<quem>`, mesmo a service role tendo acesso a tudo, para só
   poder mexer na linha do próprio dono.
+
+## A Edge Function `verificar-vinhos`
+Nasceu de uma limitação conhecida: `vinhosCarta[].pontuacaoAprox` (todos os
+vinhos da carta, não só as sugestões) é uma estimativa de memória do
+Gemini, sem pesquisa — pedir pesquisa real para os ~40 vinhos todos foi o
+que causava os timeouts que levaram a separar essa estimativa numa 2ª
+chamada leve (ver acima). Em vez de resolver isso "à bruta", esta função dá
+ao utilizador a opção de pagar o custo da pesquisa real só para os vinhos
+que ele escolher à mão na lista (até 5) — o resto da carta continua a usar
+só a estimativa aproximada.
+- Mesma arquitetura assíncrona da `sugerir-vinho` (`EdgeRuntime.waitUntil` +
+  polling), mas mexe na MESMA linha de `wineselection.analises` — só em
+  três colunas à parte: `verificacao_estado`/`verificacao`/
+  `verificacao_erro`. Nunca toca em `estado`/`resultado`. A análise já tem
+  de estar `'concluido'` (confirmado com o JWT do próprio utilizador, a RLS
+  de `analises_sel` é que garante que só vê a sua).
+- Só texto + pesquisa Google, sem imagens — mais leve que a análise
+  principal, mas continua a usar `EdgeRuntime.waitUntil` porque a pesquisa
+  em si é imprevisível.
+- **Sem fallback "sem pesquisa"** (ao contrário da `sugerir-vinho`) — se
+  todos os modelos falharem com pesquisa ligada, a função devolve erro em
+  vez de responder com uma estimativa de memória disfarçada de
+  "verificação a sério". É a única razão de a função existir; fingir que
+  verificou sem pesquisar seria pior do que não ter esta funcionalidade.
+- Duplica (não importa) a descoberta de modelo/normalizadores da
+  `sugerir-vinho.ts` — mesma convenção das outras Edge Functions
+  irmãs deste projeto (cada uma auto-contida).
+
+Pedido: `POST /functions/v1/verificar-vinhos` com
+`{analiseId, vinhos:[{nome,regiao,preco}]}` (1 a 5 vinhos, tirados de
+`resultado.vinhosCarta` da análise já concluída). Resposta também é só
+`{estado:'pendente'}` (202) — `app.js` (`wsVerificar`/`wsVerifPollTick`)
+sonda a mesma linha de `analises` até `verificacao_estado` mudar para
+`'concluido'` (lê `verificacao`, um array `[{nome,pontuacao,precoAvaliacao}]`
+na MESMA forma de `sugestoes[].pontuacao`/`precoAvaliacao`) ou `'erro'`
+(lê `verificacao_erro`).
 
 ## Contrato do pedido e da resposta (o que `app.js` envia/espera)
 Pedido: `POST /functions/v1/sugerir-vinho` com

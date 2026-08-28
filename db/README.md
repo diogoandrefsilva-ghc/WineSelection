@@ -57,7 +57,10 @@ dita-la-lhe por telefone, e a pessoa entra e troca-a em Definições
   a linha nasce `estado='pendente'` (`resultado` ainda `null`) assim que o
   pedido chega, e só fica `'concluido'`/`'erro'` quando o trabalho em
   segundo plano (`EdgeRuntime.waitUntil`) acaba — ver "A Edge Function" no
-  `CLAUDE.md`. `sync_log` (diagnóstico das chamadas à Edge Function).
+  `CLAUDE.md`. As colunas `verificacao_estado`/`verificacao`/
+  `verificacao_erro` são o mesmo padrão, mas para a verificação opcional a
+  pedido (`verificar-vinhos`, ver `CLAUDE.md`) — a mesma linha, nunca uma
+  tabela à parte. `sync_log` (diagnóstico das chamadas às Edge Functions).
 - **functions.sql** — `is_admin()`, `is_allowed()`, e o trigger
   `analises_guard_ins` (o `user_email` de uma análise nunca vem do cliente —
   é sempre carimbado a partir do login autenticado).
