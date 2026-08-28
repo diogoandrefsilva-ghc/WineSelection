@@ -119,10 +119,18 @@ Se mexeres neste contrato, mexe nos dois lados (`sugerir-vinho.ts` e
   depois corre no SQL Editor do Supabase (ou via MCP) — nunca ao contrário.
   Ver `db/README.md` para a ordem e os passos manuais (expor o schema
   `wineselection` na API, redirect URLs).
-- A imagem da carta é comprimida no cliente antes de seguir (`wsProcessarImagem`,
+- A app aceita **até 6 fotos** da carta por pedido (`_wsImagens`, grelha de
+  miniaturas em `#img-grid`) — o menu de vinhos raramente cabe numa só foto.
+  O `<input>` não tem `capture="environment"` de propósito: com esse atributo
+  o telemóvel salta a escolha "Câmara vs. Ficheiros" e vai direto à câmara,
+  sempre — sem ele o browser mostra o seletor nativo e o utilizador escolhe.
+  Cada imagem é comprimida no cliente antes de seguir (`wsProcessarImagem`,
   canvas, máx. 1600px, JPEG q0.82) — mantém os pedidos rápidos e dentro do
-  limite de 6MB de base64 que a função aceita. Há fallback para mandar o
-  ficheiro tal qual se o `createImageBitmap` falhar (ex.: formato exótico).
+  limite de 6MB de base64 por imagem (20MB no total) que a função aceita. Há
+  fallback para mandar o ficheiro tal qual se o `createImageBitmap` falhar
+  (ex.: formato exótico). O pedido à função vai como `{imagens:[{data,mime}],
+  prato}` — se mexeres neste contrato, mexe nos dois lados (`app.js` e
+  `sugerir-vinho.ts`).
 
 ## Deploy
 GitHub Pages a partir de `main`. Um push para `main` publica.

@@ -125,15 +125,15 @@ setTimeout(function(){ if (window.wsEsconderSplash) window.wsEsconderSplash(); }
   <!-- ═══ SUGERIR ═══ -->
   <div id="t-sugerir" class="tp on">
     <div class="ws-card" id="upload-card">
-      <div class="ws-card-label">1. Foto da carta de vinhos</div>
-      <div id="img-drop" class="img-drop" onclick="document.getElementById('img-input').click()">
-        <div id="img-drop-empty">
-          <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
-          <div>Tira uma foto ou escolhe um ficheiro</div>
+      <div class="ws-card-label">1. Fotos da carta de vinhos <em>(podes tirar mais que uma, se o menu não couber numa só)</em></div>
+      <div id="img-grid" class="img-grid">
+        <div class="img-add" onclick="document.getElementById('img-input').click()">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+          <div>Tirar foto / escolher ficheiro</div>
         </div>
-        <img id="img-preview" style="display:none">
       </div>
-      <input type="file" id="img-input" accept="image/*" capture="environment" style="display:none" onchange="wsImagemEscolhida(event)">
+      <div id="img-meta" class="img-meta" style="display:none"></div>
+      <input type="file" id="img-input" accept="image/*" multiple style="display:none" onchange="wsImagensEscolhidas(event)">
       <div id="img-status" class="ws-note" style="display:none"></div>
 
       <div class="ws-card-label" style="margin-top:18px">2. O que vais comer? <em>(opcional, mas ajuda)</em></div>

@@ -1,8 +1,8 @@
 // supabase/functions/sugerir-vinho/index.ts
-// WineSelection — Lê a fotografia da carta de vinhos com o Gemini, cruza com
-// pesquisa Google (Vivino e afins, para pontuação e preço de mercado) e
-// devolve uma sugestão de vinho para o prato indicado, com prioridade para
-// vinhos portugueses.
+// WineSelection — Lê a(s) fotografia(s) da carta de vinhos com o Gemini (até
+// 6 — o menu nem sempre cabe numa só foto), cruza com pesquisa Google (Vivino
+// e afins, para pontuação e preço de mercado) e devolve uma sugestão de vinho
+// para o prato indicado, com prioridade para vinhos portugueses.
 //
 // É prima da `calendario-sporting` (Goals) e da `fatura-restaurante`
 // (SplitBill) — mesmo projeto Supabase, mesma descoberta de modelo/fallback —
@@ -90,9 +90,12 @@ const CORS = {
 const TIPOS = ["Tinto", "Branco", "Rosé", "Verde", "Espumante", "Doce", "Outro"];
 const CLASSIFICACOES = ["barato", "justo", "caro", "muito_caro", "desconhecido"];
 
-const prompt = (prato: string) => `Aqui está a fotografia de uma carta de
-vinhos de um restaurante em Portugal. Lê todos os vinhos legíveis, com preço
-quando estiver impresso.
+const prompt = (prato: string, nImagens: number) => `${nImagens > 1
+  ? `Aqui estão ${nImagens} fotografias que, juntas, mostram a carta de vinhos de um restaurante em Portugal (o menu não coube numa só foto — trata-as como páginas da MESMA carta).`
+  : "Aqui está a fotografia de uma carta de vinhos de um restaurante em Portugal."}
+Lê todos os vinhos legíveis em todas as fotos, com preço quando estiver
+impresso. Se o mesmo vinho aparecer em mais que uma foto, conta-o uma única
+vez.
 
 ${prato ? `O prato a acompanhar é: "${prato}".` : "Não foi indicado nenhum prato específico — sugere vinhos versáteis e bem avaliados da carta."}
 
@@ -297,17 +300,29 @@ Deno.serve(async (req) => {
       return json({ error: "não autorizado" }, 403);
     }
 
-    const { imagem, mime, prato } = await req.json().catch(() => ({}) as any);
-    if (!imagem || typeof imagem !== "string" || imagem.length > 6_000_000) {
-      await registar("erro", { passo: "imagem" }, quem);
-      return json({ error: "imagem em falta ou demasiado grande" }, 400);
+    const { imagens, prato } = await req.json().catch(() => ({}) as any);
+    if (!Array.isArray(imagens) || imagens.length === 0 || imagens.length > 6) {
+      await registar("erro", { passo: "imagens", count: Array.isArray(imagens) ? imagens.length : null }, quem);
+      return json({ error: "envia entre 1 e 6 fotos da carta" }, 400);
+    }
+    let totalLen = 0;
+    const partsImg: unknown[] = [];
+    for (const img of imagens) {
+      const data = img && typeof img.data === "string" ? img.data : null;
+      if (!data || data.length > 6_000_000) {
+        await registar("erro", { passo: "imagem_individual" }, quem);
+        return json({ error: "uma das fotos está em falta ou é demasiado grande" }, 400);
+      }
+      totalLen += data.length;
+      if (totalLen > 20_000_000) {
+        await registar("erro", { passo: "imagens_total", total: totalLen }, quem);
+        return json({ error: "fotos demasiado grandes no total — tenta menos fotos ou mais comprimidas" }, 400);
+      }
+      partsImg.push({ inline_data: { mime_type: (img.mime as string) || "image/jpeg", data } });
     }
     const pratoLimpo = s(prato, 200);
-    const texto = prompt(pratoLimpo);
-    const parts: unknown[] = [
-      { inline_data: { mime_type: mime || "image/jpeg", data: imagem } },
-      { text: texto },
-    ];
+    const texto = prompt(pratoLimpo, imagens.length);
+    const parts: unknown[] = [...partsImg, { text: texto }];
 
     const chamarGemini = (model: string, search: boolean) => {
       const corpo: Record<string, unknown> = {
@@ -400,7 +415,8 @@ Deno.serve(async (req) => {
     console.log("SUGERIR-VINHO sugestoes:", sugestoes.length, "vinhosCarta:", vinhosCarta.length, "pesquisa:", comPesquisa);
     await registar("ok", {
       sugestoes: sugestoes.length, vinhos_carta: vinhosCarta.length, modelo: model,
-      pesquisa: comPesquisa, prato: pratoLimpo, fontes: fontes.map((f) => f.url).slice(0, 8),
+      pesquisa: comPesquisa, prato: pratoLimpo, fotos: imagens.length,
+      fontes: fontes.map((f) => f.url).slice(0, 8),
     }, quem);
 
     return json({

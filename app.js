@@ -106,8 +106,40 @@ function restaurarTab(){
   itab(tab);
 }
 
-/* ── IMAGEM DA CARTA ───────────────────────── */
-let _wsImagem=null; // {base64, mime}
+/* ── IMAGENS DA CARTA (pode ser mais que uma foto) ─────────── */
+let _wsImagens=[]; // [{base64, mime}]
+const WS_MAX_IMAGENS=6;
+
+function wsRenderImgGrid(){
+  const grid=document.getElementById('img-grid');
+  const thumbs=_wsImagens.map((img,i)=>`
+    <div class="img-thumb">
+      <img src="data:${img.mime};base64,${img.base64}">
+      <button type="button" class="img-thumb-del" onclick="wsRemoverImagem(${i})" aria-label="Remover">✕</button>
+    </div>`).join('');
+  const podeAdicionar=_wsImagens.length<WS_MAX_IMAGENS;
+  grid.innerHTML=thumbs+(podeAdicionar?`
+    <div class="img-add" onclick="document.getElementById('img-input').click()">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+      <div>${_wsImagens.length?'Adicionar mais':'Tirar foto / escolher ficheiro'}</div>
+    </div>`:'');
+  const meta=document.getElementById('img-meta');
+  if(_wsImagens.length){
+    meta.style.display='block';
+    meta.innerHTML=`${_wsImagens.length} foto${_wsImagens.length>1?'s':''} adicionada${_wsImagens.length>1?'s':''} · <a href="#" onclick="event.preventDefault();wsLimparImagens()">limpar</a>`;
+  }else{
+    meta.style.display='none';
+  }
+  document.getElementById('btn-sugerir').disabled=_wsImagens.length===0;
+}
+function wsRemoverImagem(i){
+  _wsImagens.splice(i,1);
+  wsRenderImgGrid();
+}
+function wsLimparImagens(){
+  _wsImagens=[];
+  wsRenderImgGrid();
+}
 
 async function wsProcessarImagem(file){
   const MAX=1600;
@@ -136,29 +168,37 @@ async function wsProcessarImagem(file){
   }
 }
 
-async function wsImagemEscolhida(event){
-  const file=event.target.files&&event.target.files[0];
-  if(!file)return;
+async function wsImagensEscolhidas(event){
+  const files=Array.from(event.target.files||[]);
+  event.target.value=''; // permite voltar a escolher o mesmo ficheiro / tirar outra foto a seguir
+  if(!files.length)return;
+  const espaco=WS_MAX_IMAGENS-_wsImagens.length;
+  const aProcessar=files.slice(0,Math.max(0,espaco));
   const statusEl=document.getElementById('img-status');
-  statusEl.style.display='block';statusEl.style.color='var(--mu)';statusEl.textContent='A preparar imagem…';
-  try{
-    const{base64,mime}=await wsProcessarImagem(file);
-    _wsImagem={base64,mime};
-    const preview=document.getElementById('img-preview');
-    preview.src=`data:${mime};base64,${base64}`;
-    preview.style.display='block';
-    document.getElementById('img-drop-empty').style.display='none';
-    statusEl.style.display='none';
-    document.getElementById('btn-sugerir').disabled=false;
-  }catch(e){
-    statusEl.style.color='var(--dg)';
-    statusEl.textContent='Não consegui ler esta imagem — tenta outra foto.';
+  statusEl.style.display='block';statusEl.style.color='var(--mu)';
+  let falhas=0;
+  for(let i=0;i<aProcessar.length;i++){
+    statusEl.textContent=`A preparar imagem ${_wsImagens.length+1}…`;
+    try{
+      const{base64,mime}=await wsProcessarImagem(aProcessar[i]);
+      _wsImagens.push({base64,mime});
+    }catch(e){falhas++;}
   }
+  if(falhas){
+    statusEl.style.color='var(--dg)';
+    statusEl.textContent=`Não consegui ler ${falhas>1?'algumas fotos':'uma foto'} — tenta outra vez.`;
+  }else if(files.length>aProcessar.length){
+    statusEl.style.color='var(--dg)';
+    statusEl.textContent=`Só cabem ${WS_MAX_IMAGENS} fotos de cada vez.`;
+  }else{
+    statusEl.style.display='none';
+  }
+  wsRenderImgGrid();
 }
 
 /* ── SUGERIR VINHO (chama a Edge Function) ────── */
 async function wsSugerir(){
-  if(!_wsImagem){toast('Escolhe primeiro uma foto da carta',1);return;}
+  if(!_wsImagens.length){toast('Escolhe primeiro uma foto da carta',1);return;}
   const prato=document.getElementById('in-prato').value.trim();
   const btn=document.getElementById('btn-sugerir');
   const status=document.getElementById('sugerir-status');
@@ -170,7 +210,7 @@ async function wsSugerir(){
     const r=await sbFetch(`${SB_URL}/functions/v1/sugerir-vinho`,{
       method:'POST',
       headers:{'Content-Type':'application/json','apikey':SB_KEY},
-      body:JSON.stringify({imagem:_wsImagem.base64,mime:_wsImagem.mime,prato})
+      body:JSON.stringify({imagens:_wsImagens.map(im=>({data:im.base64,mime:im.mime})),prato})
     });
     let d={};try{d=await r.json();}catch(_){}
     if(!r.ok){
