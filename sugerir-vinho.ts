@@ -440,7 +440,7 @@ Deno.serve(async (req) => {
       aviso,
       fontes: fontes.slice(0, 8),
       pesquisa: comPesquisa,
-      modelo,
+      modelo: model,
       geradoEm: new Date().toISOString(),
     });
   } catch (e) {
