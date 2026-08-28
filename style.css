@@ -115,14 +115,15 @@ header{position:sticky;top:0;z-index:50;background:var(--wine);color:#fff;box-sh
 .orc-track{
   flex:1;min-width:0;display:flex;overflow-x:auto;scroll-snap-type:x mandatory;scrollbar-width:none;-ms-overflow-style:none;
   border:1px solid var(--bo);border-radius:12px;background:#fdfbfa;
+  padding:0 16%;scroll-padding-inline:16%;
 }
 .orc-track::-webkit-scrollbar{display:none}
 .orc-item{
-  flex:0 0 100%;scroll-snap-align:center;display:flex;align-items:center;justify-content:center;
-  font-family:'Playfair Display',serif;font-size:21px;font-weight:700;color:var(--mu);padding:13px 8px;
-  user-select:none;transition:color .15s;
+  flex:0 0 68%;scroll-snap-align:center;display:flex;align-items:center;justify-content:center;
+  font-family:'Playfair Display',serif;font-size:17px;font-weight:700;color:var(--mu);padding:13px 4px;
+  user-select:none;opacity:.4;transform:scale(.86);transition:color .15s,opacity .15s,transform .15s;
 }
-.orc-item.on{color:var(--wine)}
+.orc-item.on{color:var(--wine);opacity:1;transform:scale(1);font-size:21px}
 .orc-dots{display:flex;justify-content:center;gap:6px;margin-top:9px}
 .orc-dot{width:6px;height:6px;border-radius:50%;background:var(--bo);transition:background .15s}
 .orc-dot.on{background:var(--wine)}

@@ -156,13 +156,23 @@ function wsOrcamentoAtualizarUI(){
   document.querySelectorAll('#orc-track .orc-item').forEach((el,i)=>el.classList.toggle('on',i===_wsOrcamentoIdx));
   document.querySelectorAll('#orc-dots .orc-dot').forEach((el,i)=>el.classList.toggle('on',i===_wsOrcamentoIdx));
 }
+// Os itens são mais estreitos que a faixa (mostram os vizinhos ao lado, mais
+// claros) — por isso o deslocamento certo não é i*largura-da-faixa, é medir a
+// posição real do item i e centrá-lo (funciona seja qual for a largura CSS).
+function wsOrcamentoScrollParaIndice(track,i,animar){
+  const item=track.children[i];
+  if(!item)return;
+  const tr=track.getBoundingClientRect(),ir=item.getBoundingClientRect();
+  const alvo=track.scrollLeft+(ir.left-tr.left)-(track.clientWidth-item.clientWidth)/2;
+  track.scrollTo({left:alvo,behavior:animar?'smooth':'auto'});
+}
 function wsOrcamentoDefinirIndice(i,animar){
   i=Math.max(0,Math.min(WS_ORCAMENTO_OPCOES.length-1,i));
   _wsOrcamentoIdx=i;
   try{localStorage.setItem(WS_ORCAMENTO_KEY,WS_ORCAMENTO_OPCOES[i]);}catch(e){}
   wsOrcamentoAtualizarUI();
   const track=document.getElementById('orc-track');
-  if(track)track.scrollTo({left:i*track.clientWidth,behavior:animar?'smooth':'auto'});
+  if(track)wsOrcamentoScrollParaIndice(track,i,animar);
 }
 function wsOrcamentoMover(delta){
   wsOrcamentoDefinirIndice(_wsOrcamentoIdx+delta,true);
@@ -178,16 +188,24 @@ function wsOrcamentoInit(){
   if(idx<0)idx=0;
   _wsOrcamentoIdx=idx;
   wsOrcamentoAtualizarUI();
-  requestAnimationFrame(()=>{track.scrollLeft=idx*track.clientWidth;});
+  requestAnimationFrame(()=>wsOrcamentoScrollParaIndice(track,idx,false));
+  // Ao arrastar, encontra o item cujo centro está mais perto do centro da
+  // faixa — é o que fica "selecionado" quando o dedo larga.
   let scrollTimer=null;
   track.addEventListener('scroll',()=>{
     clearTimeout(scrollTimer);
     scrollTimer=setTimeout(()=>{
-      const i=Math.round(track.scrollLeft/Math.max(1,track.clientWidth));
-      if(i!==_wsOrcamentoIdx)wsOrcamentoDefinirIndice(i,false);
+      const tr=track.getBoundingClientRect(),centro=tr.left+tr.width/2;
+      let melhor=0,menorDist=Infinity;
+      Array.from(track.children).forEach((el,i)=>{
+        const r=el.getBoundingClientRect();
+        const d=Math.abs((r.left+r.width/2)-centro);
+        if(d<menorDist){menorDist=d;melhor=i;}
+      });
+      if(melhor!==_wsOrcamentoIdx)wsOrcamentoDefinirIndice(melhor,false);
     },100);
   });
-  window.addEventListener('resize',()=>{track.scrollLeft=_wsOrcamentoIdx*track.clientWidth;});
+  window.addEventListener('resize',()=>wsOrcamentoScrollParaIndice(track,_wsOrcamentoIdx,false));
 }
 
 async function wsProcessarImagem(file){

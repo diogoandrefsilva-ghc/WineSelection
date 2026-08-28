@@ -558,7 +558,7 @@ async function processarAnalise(
       aviso,
       fontes: fontes.slice(0, 8),
       pesquisa: comPesquisa,
-      modelo,
+      modelo: model,
       geradoEm: new Date().toISOString(),
     };
     await atualizarAnalise(analiseId, quem, { estado: "concluido", resultado });
