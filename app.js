@@ -203,6 +203,9 @@ async function wsImagensEscolhidas(event){
 async function wsSugerir(){
   if(!_wsImagens.length){toast('Escolhe primeiro uma foto da carta',1);return;}
   const prato=document.getElementById('in-prato').value.trim();
+  const orcamentoRaw=document.getElementById('in-orcamento').value.trim();
+  const orcamentoNum=orcamentoRaw?parseFloat(orcamentoRaw.replace(',','.')):NaN;
+  const orcamento=(isFinite(orcamentoNum)&&orcamentoNum>0)?orcamentoNum:null;
   const btn=document.getElementById('btn-sugerir');
   const status=document.getElementById('sugerir-status');
   btn.disabled=true;const btnTxtOrig=btn.textContent;btn.textContent='A analisar a carta…';
@@ -213,7 +216,7 @@ async function wsSugerir(){
     const r=await sbFetch(`${SB_URL}/functions/v1/sugerir-vinho`,{
       method:'POST',
       headers:{'Content-Type':'application/json','apikey':SB_KEY},
-      body:JSON.stringify({imagens:_wsImagens.map(im=>({data:im.base64,mime:im.mime})),prato})
+      body:JSON.stringify({imagens:_wsImagens.map(im=>({data:im.base64,mime:im.mime})),prato,orcamento})
     });
     let d={};try{d=await r.json();}catch(_){}
     if(!r.ok){
@@ -283,7 +286,8 @@ function wsResultadoHTML(d){
   if(Array.isArray(d.vinhosCarta)&&d.vinhosCarta.length){
     html+=`<div class="ws-card">
       <div class="ws-card-label">Vinhos lidos na carta (${d.vinhosCarta.length})</div>
-      <div class="carta-list">${d.vinhosCarta.map(v=>`<div class="carta-item"><span>${esc(v.nome||'')}</span><span class="carta-preco">${fmtEur(v.preco)}</span></div>`).join('')}</div>
+      <p class="ws-note" style="margin-top:-4px">Pontuação aproximada, sem pesquisa vinho a vinho — só as sugestões acima têm fonte confirmada.</p>
+      <div class="carta-list">${d.vinhosCarta.map(v=>`<div class="carta-item"><span>${esc(v.nome||'')}</span><span class="carta-score">${v.pontuacaoAprox!=null?('⭐ '+Number(v.pontuacaoAprox).toFixed(1)):'—'}</span><span class="carta-preco">${fmtEur(v.preco)}</span></div>`).join('')}</div>
     </div>`;
   }
   if(Array.isArray(d.fontes)&&d.fontes.length){

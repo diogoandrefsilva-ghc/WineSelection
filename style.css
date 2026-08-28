@@ -154,9 +154,11 @@ a.pont-badge:active{opacity:.7}
 .bg-mu{background:#f1eeec;color:var(--mu)}
 
 .carta-list{display:flex;flex-direction:column;gap:6px}
-.carta-item{display:flex;justify-content:space-between;font-size:12.5px;padding:6px 0;border-bottom:1px solid var(--bo)}
+.carta-item{display:grid;grid-template-columns:1fr auto auto;gap:10px;align-items:center;font-size:12.5px;padding:6px 0;border-bottom:1px solid var(--bo)}
 .carta-item:last-child{border-bottom:none}
-.carta-preco{color:var(--mu)}
+.carta-item>span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.carta-score{color:var(--wr);white-space:nowrap;font-weight:600;font-size:11.5px}
+.carta-preco{color:var(--mu);white-space:nowrap}
 .ws-fontes{font-size:11px;color:var(--mu);line-height:1.7;margin:6px 2px 14px}
 .ws-fontes a{color:var(--wine)}
 

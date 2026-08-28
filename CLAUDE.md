@@ -92,16 +92,25 @@ Junta duas técnicas já usadas noutras apps do mesmo projeto:
   com as outras funções — secrets de Edge Function são por projecto, não por
   função). Não precisa de nenhum secret novo.
 
-## Contrato da resposta (o que `app.js` espera)
+## Contrato do pedido e da resposta (o que `app.js` envia/espera)
+Pedido: `{imagens:[{data,mime}], prato, orcamento}` — `orcamento` é o preço
+máximo por garrafa que o utilizador está disposto a pagar (número em euros,
+opcional, `null` se não indicado); a função só o usa para condicionar as
+`sugestoes`, nunca filtra `vinhosCarta` por causa dele.
 ```
-{ prato, sugestoes:[{nome,tipo,regiao,casta,precoCarta,
+{ prato, orcamento, sugestoes:[{nome,tipo,regiao,casta,precoCarta,
     pontuacao:[{fonte,valor,escala,url}],
     precoAvaliacao:{classificacao,faixaMercado,comentario}, combinacao}],
-  vinhosCarta:[{nome,tipo,regiao,preco}], aviso, fontes:[{titulo,url}],
-  pesquisa, modelo, geradoEm }
+  vinhosCarta:[{nome,tipo,regiao,preco,pontuacaoAprox}], aviso,
+  fontes:[{titulo,url}], pesquisa, modelo, geradoEm }
 ```
-Se mexeres neste contrato, mexe nos dois lados (`sugerir-vinho.ts` e
-`wsResultadoHTML`/`wsVinhoCardHTML` em `app.js`).
+`sugestoes[].pontuacao` é sempre confirmada por pesquisa Google (fonte real,
+com URL) — é o que sustenta a avaliação de preço. Já
+`vinhosCarta[].pontuacaoAprox` é uma estimativa geral do modelo, de memória,
+para TODOS os vinhos lidos na carta (não só as sugestões) — de propósito
+mais leve, sem pesquisa vinho a vinho, para não voltar a estourar o timeout
+com cartas grandes. Se mexeres neste contrato, mexe nos dois lados
+(`sugerir-vinho.ts` e `wsResultadoHTML`/`wsVinhoCardHTML` em `app.js`).
 
 ## Regras técnicas (não partir a app)
 - `app.js` carrega como `<script src>` **normal, NÃO module** — há

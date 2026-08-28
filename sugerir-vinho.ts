@@ -92,7 +92,7 @@ const CORS = {
 const TIPOS = ["Tinto", "Branco", "Rosé", "Verde", "Espumante", "Doce", "Outro"];
 const CLASSIFICACOES = ["barato", "justo", "caro", "muito_caro", "desconhecido"];
 
-const prompt = (prato: string, nImagens: number) => `${nImagens > 1
+const prompt = (prato: string, nImagens: number, orcamento: number | null) => `${nImagens > 1
   ? `Aqui estão ${nImagens} fotografias que, juntas, mostram a carta de vinhos de um restaurante em Portugal (o menu não coube numa só foto — trata-as como páginas da MESMA carta).`
   : "Aqui está a fotografia de uma carta de vinhos de um restaurante em Portugal."}
 Lê todos os vinhos legíveis em todas as fotos, com preço quando estiver
@@ -100,13 +100,15 @@ impresso. Se o mesmo vinho aparecer em mais que uma foto, conta-o uma única
 vez.
 
 ${prato ? `O prato a acompanhar é: "${prato}".` : "Não foi indicado nenhum prato específico — sugere vinhos versáteis e bem avaliados da carta."}
+${orcamento ? `O orçamento máximo é ${orcamento}€ por garrafa — as entradas em "sugestoes" têm de ter "precoCarta" dentro desse valor. Só saias desse limite se NENHUM vinho da carta o cumprir; nesse caso escolhe a opção mais próxima e explica isso claramente em "combinacao".` : ""}
 
 Usa PESQUISA GOOGLE para confirmar, para os vinhos que consideres candidatos
-fortes, a pontuação em sites de referência (sobretudo Vivino, mas outros como
-Wine-Searcher também servem) e uma noção do preço de RETALHO em Portugal
-(loja/venda direta do produtor), para avaliar se o preço da carta é justo —
-tendo em conta que é NORMAL um restaurante cobrar 2 a 3 vezes o preço de
-retalho; não classifiques como "caro" só por ser mais caro que a loja.
+fortes (as tuas "sugestoes"), a pontuação em sites de referência (sobretudo
+Vivino, mas outros como Wine-Searcher também servem) e uma noção do preço de
+RETALHO em Portugal (loja/venda direta do produtor), para avaliar se o preço
+da carta é justo — tendo em conta que é NORMAL um restaurante cobrar 2 a 3
+vezes o preço de retalho; não classifiques como "caro" só por ser mais caro
+que a loja.
 
 Dá prioridade a vinhos PORTUGUESES sempre que exista uma opção portuguesa
 razoável na carta que combine bem com o prato — só recomendes um vinho
@@ -119,15 +121,17 @@ Devolve APENAS um objeto JSON com esta forma exata:
   "precoAvaliacao": {"classificacao": "barato"|"justo"|"caro"|"muito_caro"|"desconhecido",
     "faixaMercado": string|null, "comentario": string},
   "combinacao": string}],
- "vinhosCarta": [{"nome": string, "tipo": string|null, "regiao": string|null, "preco": number|null}],
+ "vinhosCarta": [{"nome": string, "tipo": string|null, "regiao": string|null, "preco": number|null,
+  "pontuacaoAprox": number|null}],
  "aviso": string|null}
 
 Regras:
 - "sugestoes": entre 1 e 3 vinhos, ordenados do melhor para o pior, SÓ vinhos
   que estejam mesmo legíveis nesta carta — nunca inventes um vinho que não vês
   na foto.
-- "pontuacao": só inclui fontes que tenhas mesmo confirmado pela pesquisa —
-  nunca adivinhes uma nota. Sem confirmação fiável, "pontuacao" fica [].
+- "pontuacao" (dentro de "sugestoes"): só inclui fontes que tenhas mesmo
+  confirmado pela pesquisa — nunca adivinhes uma nota. Sem confirmação
+  fiável, "pontuacao" fica [].
 - "precoAvaliacao.faixaMercado": referência de preço de RETALHO em euros
   (ex.: "6-9€"), não o preço do restaurante.
 - "combinacao": frase curta e concreta de porque combina com o prato indicado
@@ -135,9 +139,15 @@ Regras:
   uma boa escolha geral.
 - "vinhosCarta": TODOS os vinhos que consigas ler na carta (até 40), mesmo os
   que não estão nas sugestões — nome e preço; usa null no que não leres.
+- "vinhosCarta[].pontuacaoAprox": para CADA vinho da lista (não só as
+  sugestões), a tua estimativa geral de 0 a 5 (ex.: 3.8) com base no que já
+  sabes sobre ele — NÃO precisas de pesquisar um a um, é só uma referência
+  aproximada para o utilizador comparar a carta toda de relance. null se não
+  reconheceres o vinho de todo. Isto é diferente da "pontuacao" das
+  sugestões, que essa sim tem de vir de pesquisa confirmada.
 - "aviso": preenche só se a foto estiver ilegível, sem vinhos, ou sem preços
   visíveis — caso contrário null.
-- Nunca inventes preços nem pontuações — usa null / [] na dúvida.
+- Nunca inventes preços — usa null na dúvida.
 Responde só com o JSON, sem texto à volta e sem blocos de código.`;
 
 /* Com o tool de pesquisa ligado a API recusa response_mime_type=json, por isso
@@ -228,6 +238,7 @@ function normVinhoCarta(raw: unknown): Record<string, unknown> | null {
     tipo: o.tipo ? s(o.tipo, 30) : null,
     regiao: o.regiao ? s(o.regiao, 60) : null,
     preco: numOrNull(o.preco, 0, 5000),
+    pontuacaoAprox: numOrNull(o.pontuacaoAprox, 0, 5),
   };
 }
 
@@ -302,7 +313,7 @@ Deno.serve(async (req) => {
       return json({ error: "não autorizado" }, 403);
     }
 
-    const { imagens, prato } = await req.json().catch(() => ({}) as any);
+    const { imagens, prato, orcamento } = await req.json().catch(() => ({}) as any);
     if (!Array.isArray(imagens) || imagens.length === 0 || imagens.length > 6) {
       await registar("erro", { passo: "imagens", count: Array.isArray(imagens) ? imagens.length : null }, quem);
       return json({ error: "envia entre 1 e 6 fotos da carta" }, 400);
@@ -323,7 +334,8 @@ Deno.serve(async (req) => {
       partsImg.push({ inline_data: { mime_type: (img.mime as string) || "image/jpeg", data } });
     }
     const pratoLimpo = s(prato, 200);
-    const texto = prompt(pratoLimpo, imagens.length);
+    const orcamentoNum = numOrNull(orcamento, 1, 10000);
+    const texto = prompt(pratoLimpo, imagens.length, orcamentoNum);
     const parts: unknown[] = [...partsImg, { text: texto }];
 
     /* Cada variante é uma forma de pedir a mesma coisa. Ordem por velocidade
@@ -429,12 +441,13 @@ Deno.serve(async (req) => {
     console.log("SUGERIR-VINHO sugestoes:", sugestoes.length, "vinhosCarta:", vinhosCarta.length, "pesquisa:", comPesquisa);
     await registar("ok", {
       sugestoes: sugestoes.length, vinhos_carta: vinhosCarta.length, modelo: model,
-      pesquisa: comPesquisa, prato: pratoLimpo, fotos: imagens.length,
+      pesquisa: comPesquisa, prato: pratoLimpo, fotos: imagens.length, orcamento: orcamentoNum,
       fontes: fontes.map((f) => f.url).slice(0, 8),
     }, quem);
 
     return json({
       prato: pratoLimpo,
+      orcamento: orcamentoNum,
       sugestoes,
       vinhosCarta,
       aviso,
