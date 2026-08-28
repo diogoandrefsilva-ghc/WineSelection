@@ -139,17 +139,26 @@ setTimeout(function(){ if (window.wsEsconderSplash) window.wsEsconderSplash(); }
       <div class="ws-card-label" style="margin-top:18px">2. O que vais comer? <em>(opcional, mas ajuda)</em></div>
       <input type="text" id="in-prato" placeholder="ex: bacalhau à Brás, bife grelhado, sushi…">
 
-      <div class="ws-card-label" style="margin-top:18px">3. Orçamento máximo por garrafa <em>(opcional)</em></div>
-      <select id="in-orcamento">
-        <option value="">Sem limite</option>
-        <option value="10">10 €</option>
-        <option value="15">15 €</option>
-        <option value="20">20 €</option>
-        <option value="25">25 €</option>
-        <option value="30">30 €</option>
-        <option value="40">40 €</option>
-        <option value="50">50 €</option>
-      </select>
+      <div class="ws-card-label" style="margin-top:18px">3. Orçamento máximo por garrafa <em>(opcional — desliza)</em></div>
+      <div class="orc-picker">
+        <button type="button" class="orc-arrow" onclick="wsOrcamentoMover(-1)" aria-label="Valor anterior">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+        </button>
+        <div class="orc-track" id="orc-track">
+          <div class="orc-item">Sem limite</div>
+          <div class="orc-item">10 €</div>
+          <div class="orc-item">15 €</div>
+          <div class="orc-item">20 €</div>
+          <div class="orc-item">25 €</div>
+          <div class="orc-item">30 €</div>
+          <div class="orc-item">40 €</div>
+          <div class="orc-item">50 €</div>
+        </div>
+        <button type="button" class="orc-arrow" onclick="wsOrcamentoMover(1)" aria-label="Valor seguinte">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+        </button>
+      </div>
+      <div class="orc-dots" id="orc-dots"></div>
 
       <button class="btn-prim" id="btn-sugerir" onclick="wsSugerir()" style="margin-top:18px" disabled>🍷 Sugerir vinho</button>
       <div id="sugerir-status" class="ws-note" style="display:none"></div>

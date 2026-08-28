@@ -141,6 +141,55 @@ function wsLimparImagens(){
   wsRenderImgGrid();
 }
 
+/* ── ORÇAMENTO MÁXIMO (roda horizontal, desliza em vez de combo box) ──
+   Sem valor = "sem limite" (índice 0). Lembra o último valor escolhido em
+   localStorage, para não teres de o repetir de cada vez que abres a app. */
+const WS_ORCAMENTO_OPCOES=['','10','15','20','25','30','40','50'];
+const WS_ORCAMENTO_KEY='ws_orcamento';
+let _wsOrcamentoIdx=0;
+
+function wsOrcamentoValor(){
+  const v=WS_ORCAMENTO_OPCOES[_wsOrcamentoIdx];
+  return v?parseFloat(v):null;
+}
+function wsOrcamentoAtualizarUI(){
+  document.querySelectorAll('#orc-track .orc-item').forEach((el,i)=>el.classList.toggle('on',i===_wsOrcamentoIdx));
+  document.querySelectorAll('#orc-dots .orc-dot').forEach((el,i)=>el.classList.toggle('on',i===_wsOrcamentoIdx));
+}
+function wsOrcamentoDefinirIndice(i,animar){
+  i=Math.max(0,Math.min(WS_ORCAMENTO_OPCOES.length-1,i));
+  _wsOrcamentoIdx=i;
+  try{localStorage.setItem(WS_ORCAMENTO_KEY,WS_ORCAMENTO_OPCOES[i]);}catch(e){}
+  wsOrcamentoAtualizarUI();
+  const track=document.getElementById('orc-track');
+  if(track)track.scrollTo({left:i*track.clientWidth,behavior:animar?'smooth':'auto'});
+}
+function wsOrcamentoMover(delta){
+  wsOrcamentoDefinirIndice(_wsOrcamentoIdx+delta,true);
+}
+function wsOrcamentoInit(){
+  const track=document.getElementById('orc-track');
+  const dots=document.getElementById('orc-dots');
+  if(!track||!dots)return;
+  dots.innerHTML=WS_ORCAMENTO_OPCOES.map(()=>'<span class="orc-dot"></span>').join('');
+  let saved=null;
+  try{saved=localStorage.getItem(WS_ORCAMENTO_KEY);}catch(e){}
+  let idx=WS_ORCAMENTO_OPCOES.indexOf(saved);
+  if(idx<0)idx=0;
+  _wsOrcamentoIdx=idx;
+  wsOrcamentoAtualizarUI();
+  requestAnimationFrame(()=>{track.scrollLeft=idx*track.clientWidth;});
+  let scrollTimer=null;
+  track.addEventListener('scroll',()=>{
+    clearTimeout(scrollTimer);
+    scrollTimer=setTimeout(()=>{
+      const i=Math.round(track.scrollLeft/Math.max(1,track.clientWidth));
+      if(i!==_wsOrcamentoIdx)wsOrcamentoDefinirIndice(i,false);
+    },100);
+  });
+  window.addEventListener('resize',()=>{track.scrollLeft=_wsOrcamentoIdx*track.clientWidth;});
+}
+
 async function wsProcessarImagem(file){
   // 1280px chega bem para o Gemini ler o texto da carta; com várias fotos no
   // mesmo pedido, manter cada uma mais pequena ajuda a resposta a não passar
@@ -217,8 +266,7 @@ const WS_POLL_MAX_MS=3*60*1000; // desiste de sondar ao fim de 3 minutos
 async function wsSugerir(){
   if(!_wsImagens.length){toast('Escolhe primeiro uma foto da carta',1);return;}
   const prato=document.getElementById('in-prato').value.trim();
-  const orcamentoRaw=document.getElementById('in-orcamento').value;
-  const orcamento=orcamentoRaw?parseFloat(orcamentoRaw):null;
+  const orcamento=wsOrcamentoValor();
   const btn=document.getElementById('btn-sugerir');
   const status=document.getElementById('sugerir-status');
   btn.disabled=true;
@@ -828,4 +876,4 @@ function sbLogout(){
 }
 
 /* ── INIT ──────────────────────────────────── */
-document.addEventListener('DOMContentLoaded',sbInit);
+document.addEventListener('DOMContentLoaded',()=>{wsOrcamentoInit();sbInit();});

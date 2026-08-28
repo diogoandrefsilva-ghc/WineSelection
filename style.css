@@ -104,6 +104,28 @@ header{position:sticky;top:0;z-index:50;background:var(--wine);color:#fff;box-sh
 }
 .ws-card input:focus,.ws-card select:focus{outline:none;border-color:var(--wine)}
 .ws-card label{display:block;font-size:11px;font-weight:600;color:var(--mu);text-transform:uppercase;letter-spacing:.4px;margin:12px 0 5px}
+
+/* ── ORÇAMENTO (roda horizontal) ── */
+.orc-picker{display:flex;align-items:center;gap:8px}
+.orc-arrow{
+  flex:0 0 auto;width:36px;height:36px;border-radius:50%;border:1px solid var(--bo);background:#fdfbfa;
+  color:var(--wine);display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;
+}
+.orc-arrow:active{background:var(--bg)}
+.orc-track{
+  flex:1;min-width:0;display:flex;overflow-x:auto;scroll-snap-type:x mandatory;scrollbar-width:none;-ms-overflow-style:none;
+  border:1px solid var(--bo);border-radius:12px;background:#fdfbfa;
+}
+.orc-track::-webkit-scrollbar{display:none}
+.orc-item{
+  flex:0 0 100%;scroll-snap-align:center;display:flex;align-items:center;justify-content:center;
+  font-family:'Playfair Display',serif;font-size:21px;font-weight:700;color:var(--mu);padding:13px 8px;
+  user-select:none;transition:color .15s;
+}
+.orc-item.on{color:var(--wine)}
+.orc-dots{display:flex;justify-content:center;gap:6px;margin-top:9px}
+.orc-dot{width:6px;height:6px;border-radius:50%;background:var(--bo);transition:background .15s}
+.orc-dot.on{background:var(--wine)}
 .divi{height:1px;background:var(--bo);margin:14px 0}
 
 /* ── UPLOAD (várias fotos) ── */
