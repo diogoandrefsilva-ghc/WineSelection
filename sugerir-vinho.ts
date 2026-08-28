@@ -29,8 +29,10 @@ const SB_URL = Deno.env.get("SUPABASE_URL")!;
 const SB_SRV = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const GAPI = "https://generativelanguage.googleapis.com/v1beta";
 // Abaixo dos ~60s a que o Safari/iOS mata o pedido. Mais folgado que uma
-// leitura simples porque aqui há pesquisa Google pelo meio de uma imagem.
-const TIMEOUT_MS = 55_000;
+// leitura simples porque aqui há pesquisa Google pelo meio de uma ou mais
+// imagens — mas o essencial da margem vem de desligar o "thinking" (ver
+// chamarGemini), não deste número.
+const TIMEOUT_MS = 58_000;
 
 /* ── Escolha do modelo (mesma estratégia das funções irmãs) ── */
 let _models: string[] | null = null;
@@ -324,14 +326,27 @@ Deno.serve(async (req) => {
     const texto = prompt(pratoLimpo, imagens.length);
     const parts: unknown[] = [...partsImg, { text: texto }];
 
-    const chamarGemini = (model: string, search: boolean) => {
-      const corpo: Record<string, unknown> = {
-        contents: [{ role: "user", parts }],
-        generationConfig: search
-          ? { temperature: 0 }
-          : { temperature: 0, response_mime_type: "application/json" },
-      };
-      if (search) corpo.tools = [{ google_search: {} }];
+    /* Cada variante é uma forma de pedir a mesma coisa. Ordem por velocidade
+       esperada, não por qualidade — com imagens (1 a 6) + grounding, o
+       "thinking" por omissão dos modelos 2.5 é o maior custo de latência
+       (mais do que a pesquisa em si), por isso a 1ª tentativa já vem sempre
+       com thinkingBudget:0. Sem isto, um pedido com 2+ fotos passa
+       facilmente dos 55s e nunca chega a responder (visto nos logs: o fetch
+       ao Gemini ficava pendurado até o AbortController disparar, sem sequer
+       imprimir a linha "tentativa"). */
+    type Variante = { search: boolean; semThinking: boolean; label: string };
+    const variantes: Variante[] = [
+      { search: true, semThinking: true, label: "pesquisa+sem-pensar" },
+      { search: true, semThinking: false, label: "pesquisa" },
+      { search: false, semThinking: false, label: "sem-pesquisa" },
+    ];
+    const chamarGemini = (model: string, v: Variante) => {
+      const generationConfig: Record<string, unknown> = v.search
+        ? { temperature: 0 }
+        : { temperature: 0, response_mime_type: "application/json" };
+      if (v.semThinking) generationConfig.thinkingConfig = { thinkingBudget: 0 };
+      const corpo: Record<string, unknown> = { contents: [{ role: "user", parts }], generationConfig };
+      if (v.search) corpo.tools = [{ google_search: {} }];
       return fetch(`${GAPI}/models/${model}:generateContent?key=${GEMINI_KEY}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -341,7 +356,6 @@ Deno.serve(async (req) => {
     };
 
     const transitorio = (st: number) => st === 429 || st === 500 || st === 503;
-    const sleep = (ms: number) => new Promise((res) => setTimeout(res, ms));
 
     const candidatos = await candidatosModelo(ctrl.signal);
     if (ctrl.signal.aborted) throw new DOMException("timeout", "AbortError");
@@ -350,24 +364,24 @@ Deno.serve(async (req) => {
     let comPesquisa = true;
     let g: Response | null = null;
 
+    // Sem espera com backoff entre tentativas aqui de propósito — o
+    // orçamento de tempo é apertado (Safari/iOS mata o pedido perto dos
+    // 60s), por isso um 429/500/503 salta logo para o modelo seguinte da
+    // lista em vez de esperar e repetir o mesmo.
     for (let ci = 0; ci < candidatos.length && !ctrl.signal.aborted; ci++) {
       model = candidatos[ci];
-      for (let tent = 0; tent < 2 && !ctrl.signal.aborted; tent++) {
-        comPesquisa = true;
-        g = await chamarGemini(model, true);
-        console.log("SUGERIR-VINHO tentativa:", model, "->", g.status);
-        if (g.status === 400) {
-          console.log("SUGERIR-VINHO 400:", (await g.clone().text()).slice(0, 300));
-          comPesquisa = false;
-          g = await chamarGemini(model, false);
-          console.log("SUGERIR-VINHO 400 retry s/pesquisa:", model, "->", g.status);
-        }
-        if (g.status === 404) { _models = null; break; }
-        if (transitorio(g.status)) { await sleep(700 * (tent + 1)); continue; }
-        break;
+      for (let vi = 0; vi < variantes.length && !ctrl.signal.aborted; vi++) {
+        const v = variantes[vi];
+        comPesquisa = v.search;
+        g = await chamarGemini(model, v);
+        console.log("SUGERIR-VINHO tentativa:", model, v.label, "->", g.status);
+        if (g.status === 400) continue; // esta variante não é aceite por este modelo — tenta a seguinte
+        break; // sucesso, ou erro definitivo — não continua a testar variantes deste modelo
       }
       if (g && g.ok) break;
-      if (g && !transitorio(g.status) && g.status !== 404) break;
+      if (g && g.status === 404) { _models = null; continue; } // saiu do catálogo — tenta o modelo seguinte
+      if (g && !transitorio(g.status)) break; // erro definitivo (ex: 400 em todas as variantes) — não vale a pena continuar
+      // transitório (429/500/503): tenta já o modelo seguinte, sem esperar
     }
 
     if (!g || !g.ok) {

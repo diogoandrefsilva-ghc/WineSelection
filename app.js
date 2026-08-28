@@ -142,7 +142,10 @@ function wsLimparImagens(){
 }
 
 async function wsProcessarImagem(file){
-  const MAX=1600;
+  // 1280px chega bem para o Gemini ler o texto da carta; com várias fotos no
+  // mesmo pedido, manter cada uma mais pequena ajuda a resposta a não passar
+  // do tempo que o Safari/iOS tolera antes de matar o pedido.
+  const MAX=1280;
   try{
     const bitmap=await createImageBitmap(file);
     let{width,height}=bitmap;
