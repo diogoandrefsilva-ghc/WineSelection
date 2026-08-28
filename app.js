@@ -199,7 +199,21 @@ async function wsImagensEscolhidas(event){
   wsRenderImgGrid();
 }
 
-/* ── SUGERIR VINHO (chama a Edge Function) ────── */
+/* ── SUGERIR VINHO (chama a Edge Function — trabalho assíncrono) ──
+   A análise (imagens + pesquisa Google) pode legitimamente passar de um
+   minuto. Um único pedido HTTP à espera desse tempo todo morre sempre que o
+   telemóvel bloqueia o ecrã ou se sai da app — por isso a função só cria a
+   análise (linha em wineselection.analises, estado 'pendente') e responde
+   já, continuando o trabalho a sério no servidor (EdgeRuntime.waitUntil).
+   Aqui só se pede e depois sonda-se (polling) o resultado — sobrevive a
+   sair da app, trocar de separador, ou até recarregar a página (retoma via
+   localStorage, ver wsRetomarPendente). */
+const WS_PENDENTE_KEY='ws_pendente_id';
+let _wsPollTimer=null;
+let _wsPollInicio=0;
+const WS_POLL_INTERVALO_MS=3000;
+const WS_POLL_MAX_MS=3*60*1000; // desiste de sondar ao fim de 3 minutos
+
 async function wsSugerir(){
   if(!_wsImagens.length){toast('Escolhe primeiro uma foto da carta',1);return;}
   const prato=document.getElementById('in-prato').value.trim();
@@ -207,9 +221,9 @@ async function wsSugerir(){
   const orcamento=orcamentoRaw?parseFloat(orcamentoRaw):null;
   const btn=document.getElementById('btn-sugerir');
   const status=document.getElementById('sugerir-status');
-  btn.disabled=true;const btnTxtOrig=btn.textContent;btn.textContent='A analisar a carta…';
+  btn.disabled=true;
   status.style.display='block';status.style.color='var(--mu)';
-  status.textContent='A ler a carta e a procurar avaliações e preços de referência — pode demorar até um minuto…';
+  status.textContent='A pedir a análise…';
   document.getElementById('resultado-box').innerHTML='';
   try{
     const r=await sbFetch(`${SB_URL}/functions/v1/sugerir-vinho`,{
@@ -218,20 +232,81 @@ async function wsSugerir(){
       body:JSON.stringify({imagens:_wsImagens.map(im=>({data:im.base64,mime:im.mime})),prato,orcamento})
     });
     let d={};try{d=await r.json();}catch(_){}
-    if(!r.ok){
+    if(!r.ok||!d.id){
       status.style.color='var(--dg)';
       status.textContent=d.error||('Erro HTTP '+r.status+' — tenta outra vez.');
+      btn.disabled=false;
       return;
     }
-    status.style.display='none';
-    document.getElementById('resultado-box').innerHTML=wsResultadoHTML(d);
-    wsGuardarHistorico(prato,d);
+    try{localStorage.setItem(WS_PENDENTE_KEY,String(d.id));}catch(e){}
+    wsIniciarPolling(d.id);
   }catch(e){
     status.style.color='var(--dg)';
     status.textContent='Erro de ligação — tenta outra vez.';
-  }finally{
-    btn.disabled=false;btn.textContent=btnTxtOrig;
+    btn.disabled=false;
   }
+}
+
+function wsIniciarPolling(id){
+  clearTimeout(_wsPollTimer);
+  _wsPollInicio=Date.now();
+  document.getElementById('btn-sugerir').disabled=true;
+  const status=document.getElementById('sugerir-status');
+  status.style.display='block';status.style.color='var(--mu)';
+  status.textContent='A ler a carta e a procurar avaliações e preços de referência — podes sair da app, a análise continua…';
+  wsPollTick(id);
+}
+
+async function wsPollTick(id){
+  const status=document.getElementById('sugerir-status');
+  if(Date.now()-_wsPollInicio>WS_POLL_MAX_MS){
+    wsPollTerminar();
+    if(status){status.style.color='var(--dg)';status.textContent='Está a demorar demasiado — tenta outra vez daqui a pouco.';}
+    return;
+  }
+  try{
+    const rows=await sbReq('GET',`analises?id=eq.${id}&select=id,estado,resultado,erro,prato`);
+    const row=rows&&rows[0];
+    if(!row){wsPollTerminar();return;}
+    if(row.estado==='concluido'){
+      wsPollTerminar();
+      if(status)status.style.display='none';
+      document.getElementById('resultado-box').innerHTML=wsResultadoHTML(row.resultado||{});
+      return;
+    }
+    if(row.estado==='erro'){
+      wsPollTerminar();
+      if(status){status.style.color='var(--dg)';status.textContent=row.erro||'Não consegui analisar esta carta — tenta outra vez.';}
+      return;
+    }
+  }catch(e){ /* falha transitória de rede — tenta outra vez no próximo tick */ }
+  _wsPollTimer=setTimeout(()=>wsPollTick(id),WS_POLL_INTERVALO_MS);
+}
+
+function wsPollTerminar(){
+  clearTimeout(_wsPollTimer);
+  _wsPollTimer=null;
+  try{localStorage.removeItem(WS_PENDENTE_KEY);}catch(e){}
+  const btn=document.getElementById('btn-sugerir');
+  if(btn)btn.disabled=false;
+}
+
+// Ao voltar a ficar visível (troca de app, ecrã desbloqueado), sonda já em
+// vez de esperar pelo próximo tick — resposta mais rápida ao regressar.
+document.addEventListener('visibilitychange',()=>{
+  if(document.visibilityState==='visible'&&_wsPollTimer){
+    let id=null;
+    try{id=localStorage.getItem(WS_PENDENTE_KEY);}catch(e){}
+    if(id){clearTimeout(_wsPollTimer);wsPollTick(id);}
+  }
+});
+
+// Retoma uma análise que ficou a meio (ex.: recarregou a página) — chamado
+// depois do login, em sbAposLogin.
+function wsRetomarPendente(){
+  let id=null;
+  try{id=localStorage.getItem(WS_PENDENTE_KEY);}catch(e){}
+  if(id)wsIniciarPolling(id);
 }
 
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
@@ -313,16 +388,16 @@ function wsResultadoHTML(d){
 }
 
 /* ── HISTÓRICO ─────────────────────────────── */
-async function wsGuardarHistorico(prato,resultado){
-  try{
-    await sbReq('POST','analises',{prato,resultado},{Prefer:'return=minimal'});
-  }catch(e){/* não bloqueia a UI por causa disto */}
-}
+// Não há gravação em separado — a linha já nasce em `analises` assim que a
+// análise é pedida (a Edge Function é que a cria, ver wsSugerir) e fica
+// atualizada in-place quando o trabalho em segundo plano acaba. O histórico
+// é literalmente essa tabela: pode conter linhas 'pendente' ou 'erro', não
+// só 'concluido'.
 async function wsCarregarHistorico(){
   const box=document.getElementById('historico-list');
   box.innerHTML='<p class="ws-note">A carregar…</p>';
   try{
-    const rows=await sbReq('GET','analises?select=id,prato,resultado,criado_em&order=criado_em.desc&limit=30');
+    const rows=await sbReq('GET','analises?select=id,prato,estado,resultado,erro,criado_em&order=criado_em.desc&limit=30');
     if(!rows||!rows.length){box.innerHTML='<p class="ws-note">Ainda não fizeste nenhuma pesquisa.</p>';return;}
     box.innerHTML=rows.map(r=>wsHistItemHTML(r)).join('');
   }catch(e){box.innerHTML='<p class="ws-note">Erro a carregar histórico.</p>';}
@@ -332,15 +407,21 @@ function wsHistItemHTML(r){
   const top=sug[0]||null;
   const data=new Date(r.criado_em);
   const dataFmt=isNaN(data)?'':data.toLocaleDateString('pt-PT',{day:'2-digit',month:'short',year:'numeric'});
+  const topTxt=r.estado==='pendente'?'⏳ a analisar…':r.estado==='erro'?'⚠️ falhou':(top?('🍷 '+esc(top.nome)):'sem sugestões');
+  const corpo=r.estado==='concluido'
+    ?wsResultadoHTML(r.resultado||{})
+    :r.estado==='erro'
+      ?`<p class="ws-note" style="color:var(--dg)">${esc(r.erro||'Falhou — tenta outra vez.')}</p>`
+      :'<p class="ws-note">Ainda a analisar — atualiza esta lista daqui a pouco.</p>';
   return `<div class="hist-item">
     <div class="hist-head" onclick="wsToggleHist(${r.id})">
       <div>
         <div class="hist-prato">${esc(r.prato||'(sem prato indicado)')}</div>
-        <div class="hist-top">${top?('🍷 '+esc(top.nome)):'sem sugestões'}</div>
+        <div class="hist-top">${topTxt}</div>
       </div>
       <div class="hist-data">${dataFmt}</div>
     </div>
-    <div class="hist-body" id="hist-body-${r.id}" style="display:none">${wsResultadoHTML(r.resultado||{})}</div>
+    <div class="hist-body" id="hist-body-${r.id}" style="display:none">${corpo}</div>
   </div>`;
 }
 function wsToggleHist(id){
@@ -539,6 +620,7 @@ async function sbAposLogin(){
   if(contaEmailEl)contaEmailEl.textContent=`Sessão iniciada como ${email}`;
   document.getElementById('fcard-utilizadores').style.display=isAdmin()?'':'none';
   restaurarTab();
+  wsRetomarPendente();
   if(isAdmin()){sbRenderPedidos();sbRenderPassTemp();}
   if(window.wsEsconderSplash)window.wsEsconderSplash();
 }

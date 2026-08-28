@@ -53,7 +53,11 @@ dita-la-lhe por telefone, e a pessoa entra e troca-a em Definições
 - **schema.sql** — `allowed_users`, `access_requests` (controlo de acesso,
   igual ao Goals/FestasBV), `analises` (histórico de sugestões — guarda o
   `prato` e o `resultado` estruturado que o Gemini devolveu; a imagem em si
-  NUNCA se guarda), `sync_log` (diagnóstico das chamadas à Edge Function).
+  NUNCA se guarda). Também é a fila de trabalho assíncrono da Edge Function:
+  a linha nasce `estado='pendente'` (`resultado` ainda `null`) assim que o
+  pedido chega, e só fica `'concluido'`/`'erro'` quando o trabalho em
+  segundo plano (`EdgeRuntime.waitUntil`) acaba — ver "A Edge Function" no
+  `CLAUDE.md`. `sync_log` (diagnóstico das chamadas à Edge Function).
 - **functions.sql** — `is_admin()`, `is_allowed()`, e o trigger
   `analises_guard_ins` (o `user_email` de uma análise nunca vem do cliente —
   é sempre carimbado a partir do login autenticado).

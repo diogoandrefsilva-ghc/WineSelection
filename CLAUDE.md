@@ -91,24 +91,53 @@ Junta duas técnicas já usadas noutras apps do mesmo projeto:
 - Secrets: usa o `GEMINI_API_KEY` **já existente no projecto** (partilhado
   com as outras funções — secrets de Edge Function são por projecto, não por
   função). Não precisa de nenhum secret novo.
-- **Duas chamadas ao Gemini, não uma**: a primeira (imagens + pesquisa) só
-  devolve `sugestoes` e `vinhosCarta` sem pontuação aproximada — é a que fica
-  presa se lhe pedires demasiado. `pontuacaoAprox` de cada vinho da carta
-  vem de uma SEGUNDA chamada, `pedirPontuacoesAprox`, só texto (os nomes já
-  lidos), sem imagens nem pesquisa, com o seu próprio limite de 15s à parte
-  do timeout geral. Tentar pedir as duas coisas na mesma chamada (imagens +
-  pesquisa + estimar ~20-40 vinhos um a um) esgotava sempre o tempo
-  disponível, mesmo com `thinkingBudget:0` — visto nos logs (`query_logs` do
-  Supabase, `function_logs`): o fetch ao Gemini nunca chegava a responder.
-  Se a segunda chamada falhar ou passar do limite, a resposta principal
-  segue à mesma, só sem `pontuacaoAprox` (fica `null`) — nunca deita tudo
-  abaixo por isto.
+- **Duas chamadas ao Gemini, não uma**: a pesada (imagens + pesquisa) só
+  devolve `sugestoes` e `vinhosCarta` sem pontuação aproximada.
+  `pontuacaoAprox` de cada vinho da carta vem de uma SEGUNDA chamada,
+  `pedirPontuacoesAprox`, só texto (os nomes já lidos), sem imagens nem
+  pesquisa, com o seu próprio limite de 15s. Pedir as duas coisas na mesma
+  chamada (imagens + pesquisa + estimar ~20-40 vinhos um a um) esgotava
+  sempre o tempo disponível, mesmo com `thinkingBudget:0`. Se a segunda
+  chamada falhar, a análise principal segue à mesma, só sem `pontuacaoAprox`
+  (fica `null`) — nunca deita tudo abaixo por isto.
+- **Trabalho assíncrono (`EdgeRuntime.waitUntil`)** — a parte mais
+  importante do desenho: a análise (imagens + pesquisa Google) pode
+  legitimamente passar de um minuto (confirmado nos logs — é o próprio
+  Gemini, não um bug). Um único pedido HTTP à espera desse tempo todo morre
+  sempre que o telemóvel bloqueia o ecrã ou o browser troca de app — era
+  isso que causava tanto o erro de "demasiado tempo" como o "erro de
+  ligação" ao voltar à app. A função por isso:
+  1. valida o pedido e cria já a linha em `wineselection.analises` (estado
+     `'pendente'`), usando o **próprio JWT do utilizador** (pass-through do
+     header `Authorization`, não a service role) para a RLS/trigger
+     correrem normalmente;
+  2. responde já ao browser com `{id, estado:'pendente'}` (202);
+  3. só DEPOIS de responder é que faz o trabalho a sério, com
+     `EdgeRuntime.waitUntil(processarAnalise(...))` — isto sobrevive ao
+     pedido original terminar, ligação incluída.
+  `processarAnalise` fecha sempre a linha no fim, por `PATCH` com a service
+  role (`estado:'concluido'`+`resultado`, ou `estado:'erro'`+`erro`) — nunca
+  a deixa presa em `'pendente'`. O `WHERE` do PATCH inclui sempre
+  `user_email=eq.<quem>`, mesmo a service role tendo acesso a tudo, para só
+  poder mexer na linha do próprio dono.
 
 ## Contrato do pedido e da resposta (o que `app.js` envia/espera)
-Pedido: `{imagens:[{data,mime}], prato, orcamento}` — `orcamento` é o preço
-máximo por garrafa que o utilizador está disposto a pagar (número em euros,
+Pedido: `POST /functions/v1/sugerir-vinho` com
+`{imagens:[{data,mime}], prato, orcamento}` — `orcamento` é o preço máximo
+por garrafa que o utilizador está disposto a pagar (número em euros,
 opcional, `null` se não indicado); a função só o usa para condicionar as
 `sugestoes`, nunca filtra `vinhosCarta` por causa dele.
+
+**A resposta do pedido não é o resultado** — é só `{id, estado:'pendente'}`
+(202). `app.js` (`wsIniciarPolling`/`wsPollTick`) sonda
+`wineselection.analises?id=eq.<id>` de 3 em 3 segundos até `estado` mudar
+para `'concluido'` (lê `resultado`) ou `'erro'` (lê `erro`) — com um limite
+de 3 minutos antes de desistir. Retoma o polling sozinho ao voltar a ficar
+visível (`visibilitychange`) e mesmo depois de recarregar a página
+(`wsRetomarPendente`, chamado em `sbAposLogin`, via o `id` guardado em
+`localStorage['ws_pendente_id']`).
+
+A forma de `resultado` (a coluna jsonb, dentro da linha de `analises`):
 ```
 { prato, orcamento, sugestoes:[{nome,tipo,regiao,casta,precoCarta,
     pontuacao:[{fonte,valor,escala,url}],
@@ -120,9 +149,10 @@ opcional, `null` se não indicado); a função só o usa para condicionar as
 com URL) — é o que sustenta a avaliação de preço. Já
 `vinhosCarta[].pontuacaoAprox` é uma estimativa geral do modelo, de memória,
 para TODOS os vinhos lidos na carta (não só as sugestões) — de propósito
-mais leve, sem pesquisa vinho a vinho, para não voltar a estourar o timeout
-com cartas grandes. Se mexeres neste contrato, mexe nos dois lados
-(`sugerir-vinho.ts` e `wsResultadoHTML`/`wsVinhoCardHTML` em `app.js`).
+mais leve, sem pesquisa vinho a vinho, para não voltar a estourar o tempo
+de resposta com cartas grandes. Se mexeres neste contrato, mexe em três
+sítios (`sugerir-vinho.ts`, `wsResultadoHTML`/`wsVinhoCardHTML` em `app.js`,
+e o `resultado jsonb` de `db/schema.sql`).
 
 ## Regras técnicas (não partir a app)
 - `app.js` carrega como `<script src>` **normal, NÃO module** — há
@@ -146,12 +176,10 @@ com cartas grandes. Se mexeres neste contrato, mexe nos dois lados
   o telemóvel salta a escolha "Câmara vs. Ficheiros" e vai direto à câmara,
   sempre — sem ele o browser mostra o seletor nativo e o utilizador escolhe.
   Cada imagem é comprimida no cliente antes de seguir (`wsProcessarImagem`,
-  canvas, máx. 1600px, JPEG q0.82) — mantém os pedidos rápidos e dentro do
+  canvas, máx. 1280px, JPEG q0.82) — mantém os pedidos rápidos e dentro do
   limite de 6MB de base64 por imagem (20MB no total) que a função aceita. Há
   fallback para mandar o ficheiro tal qual se o `createImageBitmap` falhar
-  (ex.: formato exótico). O pedido à função vai como `{imagens:[{data,mime}],
-  prato}` — se mexeres neste contrato, mexe nos dois lados (`app.js` e
-  `sugerir-vinho.ts`).
+  (ex.: formato exótico).
 
 ## Deploy
 GitHub Pages a partir de `main`. Um push para `main` publica.

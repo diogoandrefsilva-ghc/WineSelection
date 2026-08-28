@@ -12,6 +12,19 @@
 // de pesquisa ligado a API recusa response_mime_type=json, por isso o JSON
 // vem em texto e é extraído aqui (extrairJson).
 //
+// ── TRABALHO ASSÍNCRONO (EdgeRuntime.waitUntil) ──
+// A análise em si (imagens + pesquisa Google) pode legitimamente passar de um
+// minuto — visto nos logs, é o próprio Gemini que demora, não um bug nosso.
+// Um único pedido HTTP à espera desse tempo todo morre sempre que o
+// telemóvel bloqueia o ecrã ou o browser passa para outra app (é o que
+// causava tanto o "demasiado tempo" como o "erro de ligação" ao voltar à
+// app). Por isso a função devolve já o `id` da análise (linha criada em
+// `wineselection.analises`, estado 'pendente') e continua o trabalho a
+// sério em segundo plano com `EdgeRuntime.waitUntil` — sobrevive ao pedido
+// original terminar. A app (`app.js`) faz polling a essa linha até o estado
+// mudar para 'concluido'/'erro', e retoma o polling sozinha ao voltar a
+// ficar visível (ou mesmo depois de recarregar a página, via localStorage).
+//
 // Chamada pelo browser com o JWT do utilizador (verify_jwt fica LIGADO no
 // deploy). Por cima disso confirma-se que o email consta de
 // `wineselection.allowed_users` — qualquer utilizador aprovado pode usar
@@ -24,15 +37,21 @@
 //
 // Deploy: supabase functions deploy sugerir-vinho
 
+// Só tipos — dá o global `EdgeRuntime` ao compilador (usado por processarAnalise).
+import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+
 const GEMINI_KEY = Deno.env.get("GEMINI_API_KEY")!;
 const SB_URL = Deno.env.get("SUPABASE_URL")!;
 const SB_SRV = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const GAPI = "https://generativelanguage.googleapis.com/v1beta";
-// Abaixo dos ~60s a que o Safari/iOS mata o pedido. Mais folgado que uma
-// leitura simples porque aqui há pesquisa Google pelo meio de uma ou mais
-// imagens — mas o essencial da margem vem de desligar o "thinking" (ver
-// chamarGemini), não deste número.
-const TIMEOUT_MS = 58_000;
+// Orçamento de tempo do trabalho em segundo plano (imagens + pesquisa) — já
+// não está limitado pelo browser (o pedido original já respondeu há muito),
+// só pelo teto de wall-clock do plano Supabase para a função. Generoso de
+// propósito: a pesquisa Google com várias imagens é lenta e imprevisível.
+const PROC_TIMEOUT_MS = 110_000;
+// Limite curto só para a parte síncrona (autorizar + criar a linha) — esta
+// sim tem de responder depressa ao browser.
+const SYNC_TIMEOUT_MS = 10_000;
 
 /* ── Escolha do modelo (mesma estratégia das funções irmãs) ── */
 let _models: string[] | null = null;
@@ -243,10 +262,9 @@ function normVinhoCarta(raw: unknown): Record<string, unknown> | null {
 /* Segunda chamada, leve e SEM imagens nem pesquisa — só texto com os nomes já
    lidos na primeira. É o que permite dar uma pontuação aproximada a TODA a
    carta (não só as sugestões) sem repetir o custo caro de ler imagens +
-   grounding por cada um dos até 40 vinhos: isso, tentado numa única chamada,
-   estourava sempre o tempo disponível (visto nos logs — nem "thinking"
-   desligado chegava). Corre com um limite de tempo próprio, curto, e nunca
-   derruba a resposta principal se falhar — fica só sem pontuação aproximada. */
+   grounding por cada um dos até 40 vinhos. Corre com um limite de tempo
+   próprio, curto, e nunca derruba a análise principal se falhar — fica só
+   sem pontuação aproximada. */
 async function pedirPontuacoesAprox(
   nomes: string[],
   model: string,
@@ -347,6 +365,218 @@ async function registar(estado: string, detalhe: Record<string, unknown>, quem: 
   }
 }
 
+/* Cria a linha em `wineselection.analises` (estado 'pendente' por omissão)
+   usando o PRÓPRIO JWT do utilizador (pass-through do header Authorization,
+   igual ao que já se faz em emailAutorizado para /auth/v1/user) — assim a
+   RLS e o trigger `analises_guard_ins` correm normalmente e o `user_email`
+   fica certo, sem ser preciso confiar em nada que o cliente mande. */
+async function criarAnaliseRegisto(auth: string, prato: string, signal: AbortSignal): Promise<number | null> {
+  const r = await fetch(`${SB_URL}/rest/v1/analises`, {
+    method: "POST",
+    headers: {
+      apikey: SB_SRV,
+      Authorization: auth,
+      "Content-Type": "application/json",
+      "Content-Profile": "wineselection",
+      Prefer: "return=representation",
+    },
+    signal,
+    body: JSON.stringify({ prato }),
+  });
+  if (!r.ok) {
+    console.log("SUGERIR-VINHO criar registo erro:", r.status, (await r.text().catch(() => "")).slice(0, 300));
+    return null;
+  }
+  const rows = await r.json();
+  const id = rows?.[0]?.id;
+  return typeof id === "number" ? id : null;
+}
+
+/* Fecha a linha (concluído ou erro) — SERVICE ROLE porque isto corre em
+   segundo plano, depois do pedido original (e do seu JWT) já ter respondido.
+   `user_email=eq.` no WHERE garante que só mexe na linha do próprio dono,
+   mesmo a service role tendo acesso a tudo — não confia só no `id`. */
+async function atualizarAnalise(id: number, quem: string, patch: Record<string, unknown>): Promise<void> {
+  try {
+    const r = await fetch(
+      `${SB_URL}/rest/v1/analises?id=eq.${id}&user_email=eq.${encodeURIComponent(quem)}`,
+      {
+        method: "PATCH",
+        headers: {
+          apikey: SB_SRV,
+          Authorization: `Bearer ${SB_SRV}`,
+          "Content-Type": "application/json",
+          "Content-Profile": "wineselection",
+          Prefer: "return=minimal",
+        },
+        body: JSON.stringify(patch),
+      },
+    );
+    if (!r.ok) console.log("SUGERIR-VINHO atualizar registo falhou:", r.status);
+  } catch (e) {
+    console.log("SUGERIR-VINHO atualizar registo erro:", String((e as Error).message).slice(0, 200));
+  }
+}
+
+/* O trabalho a sério — chamado via EdgeRuntime.waitUntil, corre depois de já
+   se ter respondido ao browser. Nunca deixa a linha presa em 'pendente':
+   ou fecha 'concluido' com o resultado, ou 'erro' com uma mensagem legível. */
+async function processarAnalise(
+  partsImg: unknown[],
+  pratoLimpo: string,
+  nImagens: number,
+  orcamentoNum: number | null,
+  quem: string,
+  analiseId: number,
+): Promise<void> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), PROC_TIMEOUT_MS);
+  let model = "gemini-flash-latest";
+  let comPesquisa = true;
+
+  try {
+    const texto = prompt(pratoLimpo, nImagens, orcamentoNum);
+    const parts: unknown[] = [...partsImg, { text: texto }];
+
+    /* Cada variante é uma forma de pedir a mesma coisa. Ordem por velocidade
+       esperada, não por qualidade — com imagens (1 a 6) + grounding, o
+       "thinking" por omissão dos modelos 2.5 é um custo de latência grande,
+       por isso a 1ª tentativa já vem sempre com thinkingBudget:0. */
+    type Variante = { search: boolean; semThinking: boolean; label: string };
+    const variantes: Variante[] = [
+      { search: true, semThinking: true, label: "pesquisa+sem-pensar" },
+      { search: true, semThinking: false, label: "pesquisa" },
+      { search: false, semThinking: false, label: "sem-pesquisa" },
+    ];
+    const chamarGemini = (m: string, v: Variante) => {
+      const generationConfig: Record<string, unknown> = v.search
+        ? { temperature: 0 }
+        : { temperature: 0, response_mime_type: "application/json" };
+      if (v.semThinking) generationConfig.thinkingConfig = { thinkingBudget: 0 };
+      const corpo: Record<string, unknown> = { contents: [{ role: "user", parts }], generationConfig };
+      if (v.search) corpo.tools = [{ google_search: {} }];
+      return fetch(`${GAPI}/models/${m}:generateContent?key=${GEMINI_KEY}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: ctrl.signal,
+        body: JSON.stringify(corpo),
+      });
+    };
+
+    const transitorio = (st: number) => st === 429 || st === 500 || st === 503;
+
+    const candidatos = await candidatosModelo(ctrl.signal);
+    if (ctrl.signal.aborted) throw new DOMException("timeout", "AbortError");
+    console.log("SUGERIR-VINHO candidatos:", candidatos.join(", "));
+    let g: Response | null = null;
+
+    for (let ci = 0; ci < candidatos.length && !ctrl.signal.aborted; ci++) {
+      model = candidatos[ci];
+      for (let vi = 0; vi < variantes.length && !ctrl.signal.aborted; vi++) {
+        const v = variantes[vi];
+        comPesquisa = v.search;
+        g = await chamarGemini(model, v);
+        console.log("SUGERIR-VINHO tentativa:", model, v.label, "->", g.status);
+        if (g.status === 400) continue; // esta variante não é aceite por este modelo — tenta a seguinte
+        break; // sucesso, ou erro definitivo — não continua a testar variantes deste modelo
+      }
+      if (g && g.ok) break;
+      if (g && g.status === 404) { _models = null; continue; } // saiu do catálogo — tenta o modelo seguinte
+      if (g && !transitorio(g.status)) break; // erro definitivo (ex: 400 em todas as variantes) — não vale a pena continuar
+      // transitório (429/500/503): tenta já o modelo seguinte, sem esperar
+    }
+
+    if (!g || !g.ok) {
+      const status = g?.status ?? 502;
+      const detail = g ? await g.text() : "";
+      console.error("gemini", model, status, detail.slice(0, 500));
+      let msg = "";
+      try { msg = JSON.parse(detail)?.error?.message ?? ""; } catch (_) { /**/ }
+      await registar("erro", {
+        passo: "gemini", status, modelo: model, pesquisa: comPesquisa,
+        erro: (msg || detail).slice(0, 800),
+      }, quem);
+      const erroUtilizador = transitorio(status)
+        ? "o serviço está com muita procura agora — espera um minuto e tenta outra vez"
+        : `gemini ${status} (${model})${msg ? ": " + msg.slice(0, 200) : ""}`;
+      await atualizarAnalise(analiseId, quem, { estado: "erro", erro: erroUtilizador });
+      return;
+    }
+
+    const gd = await g.json();
+    const cand = gd?.candidates?.[0];
+    const texto2 = (cand?.content?.parts ?? []).map((p: any) => p?.text ?? "").join("").trim();
+    const parsed: any = extrairJson(texto2);
+    if (!parsed) {
+      console.error("SUGERIR-VINHO resposta ilegível:", texto2.slice(0, 400));
+      await registar("erro", { passo: "json", modelo: model, pesquisa: comPesquisa, amostra: texto2.slice(0, 800) }, quem);
+      await atualizarAnalise(analiseId, quem, {
+        estado: "erro",
+        erro: "resposta ilegível do modelo — tenta uma foto mais nítida",
+      });
+      return;
+    }
+
+    const sugestoes = (Array.isArray(parsed.sugestoes) ? parsed.sugestoes : [])
+      .map(normSugestao).filter(Boolean).slice(0, 5);
+    const vinhosCarta = (Array.isArray(parsed.vinhosCarta) ? parsed.vinhosCarta : [])
+      .map(normVinhoCarta).filter(Boolean).slice(0, 60) as Record<string, unknown>[];
+    const aviso = parsed.aviso ? s(parsed.aviso, 200) : null;
+
+    // Chamada leve à parte, só texto — nunca falha a análise principal (ver
+    // pedirPontuacoesAprox), só fica sem pontuação aproximada se correr mal.
+    if (vinhosCarta.length && !ctrl.signal.aborted) {
+      const pontuacoes = await pedirPontuacoesAprox(
+        vinhosCarta.map((v) => String(v.nome)),
+        model,
+        ctrl.signal,
+      );
+      vinhosCarta.forEach((v, i) => { v.pontuacaoAprox = pontuacoes[i] ?? null; });
+    }
+
+    const fontes: { titulo: string; url: string }[] = [];
+    (cand?.groundingMetadata?.groundingChunks ?? []).forEach((c: any) => {
+      const w = c?.web;
+      if (w?.uri && !fontes.some((f) => f.url === w.uri)) {
+        fontes.push({ titulo: String(w.title ?? w.uri).slice(0, 80), url: String(w.uri) });
+      }
+    });
+
+    console.log("SUGERIR-VINHO sugestoes:", sugestoes.length, "vinhosCarta:", vinhosCarta.length, "pesquisa:", comPesquisa);
+    await registar("ok", {
+      sugestoes: sugestoes.length, vinhos_carta: vinhosCarta.length, modelo: model,
+      pesquisa: comPesquisa, prato: pratoLimpo, fotos: nImagens, orcamento: orcamentoNum,
+      pontuacoes_aprox: vinhosCarta.filter((v) => v.pontuacaoAprox != null).length,
+      fontes: fontes.map((f) => f.url).slice(0, 8),
+    }, quem);
+
+    const resultado = {
+      prato: pratoLimpo,
+      orcamento: orcamentoNum,
+      sugestoes,
+      vinhosCarta,
+      aviso,
+      fontes: fontes.slice(0, 8),
+      pesquisa: comPesquisa,
+      modelo,
+      geradoEm: new Date().toISOString(),
+    };
+    await atualizarAnalise(analiseId, quem, { estado: "concluido", resultado });
+  } catch (e) {
+    const err = e as Error;
+    const timeout = err.name === "AbortError";
+    await registar("erro", { passo: timeout ? "timeout" : "excecao", erro: String(err.message).slice(0, 500) }, quem);
+    await atualizarAnalise(analiseId, quem, {
+      estado: "erro",
+      erro: timeout
+        ? "o modelo demorou demasiado a analisar a carta — tenta outra vez, ou uma foto mais nítida"
+        : (err.message || "erro inesperado"),
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
   const json = (body: unknown, status = 200) =>
@@ -355,13 +585,14 @@ Deno.serve(async (req) => {
       headers: { ...CORS, "Content-Type": "application/json" },
     });
 
+  const authHeader = req.headers.get("Authorization") ?? "";
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+  const timer = setTimeout(() => ctrl.abort(), SYNC_TIMEOUT_MS);
   let quem: string | null = null;
 
   try {
     console.log("SUGERIR-VINHO start");
-    const auth = await emailAutorizado(req.headers.get("Authorization") ?? "", ctrl.signal);
+    const auth = await emailAutorizado(authHeader, ctrl.signal);
     quem = auth.email;
     if (!auth.ok) {
       await registar("erro", { passo: "autorizacao" }, quem);
@@ -390,148 +621,24 @@ Deno.serve(async (req) => {
     }
     const pratoLimpo = s(prato, 200);
     const orcamentoNum = numOrNull(orcamento, 1, 10000);
-    const texto = prompt(pratoLimpo, imagens.length, orcamentoNum);
-    const parts: unknown[] = [...partsImg, { text: texto }];
 
-    /* Cada variante é uma forma de pedir a mesma coisa. Ordem por velocidade
-       esperada, não por qualidade — com imagens (1 a 6) + grounding, o
-       "thinking" por omissão dos modelos 2.5 é o maior custo de latência
-       (mais do que a pesquisa em si), por isso a 1ª tentativa já vem sempre
-       com thinkingBudget:0. Sem isto, um pedido com 2+ fotos passa
-       facilmente dos 55s e nunca chega a responder (visto nos logs: o fetch
-       ao Gemini ficava pendurado até o AbortController disparar, sem sequer
-       imprimir a linha "tentativa"). */
-    type Variante = { search: boolean; semThinking: boolean; label: string };
-    const variantes: Variante[] = [
-      { search: true, semThinking: true, label: "pesquisa+sem-pensar" },
-      { search: true, semThinking: false, label: "pesquisa" },
-      { search: false, semThinking: false, label: "sem-pesquisa" },
-    ];
-    const chamarGemini = (model: string, v: Variante) => {
-      const generationConfig: Record<string, unknown> = v.search
-        ? { temperature: 0 }
-        : { temperature: 0, response_mime_type: "application/json" };
-      if (v.semThinking) generationConfig.thinkingConfig = { thinkingBudget: 0 };
-      const corpo: Record<string, unknown> = { contents: [{ role: "user", parts }], generationConfig };
-      if (v.search) corpo.tools = [{ google_search: {} }];
-      return fetch(`${GAPI}/models/${model}:generateContent?key=${GEMINI_KEY}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        signal: ctrl.signal,
-        body: JSON.stringify(corpo),
-      });
-    };
-
-    const transitorio = (st: number) => st === 429 || st === 500 || st === 503;
-
-    const candidatos = await candidatosModelo(ctrl.signal);
-    if (ctrl.signal.aborted) throw new DOMException("timeout", "AbortError");
-    console.log("SUGERIR-VINHO candidatos:", candidatos.join(", "));
-    let model = candidatos[0] ?? "gemini-flash-latest";
-    let comPesquisa = true;
-    let g: Response | null = null;
-
-    // Sem espera com backoff entre tentativas aqui de propósito — o
-    // orçamento de tempo é apertado (Safari/iOS mata o pedido perto dos
-    // 60s), por isso um 429/500/503 salta logo para o modelo seguinte da
-    // lista em vez de esperar e repetir o mesmo.
-    for (let ci = 0; ci < candidatos.length && !ctrl.signal.aborted; ci++) {
-      model = candidatos[ci];
-      for (let vi = 0; vi < variantes.length && !ctrl.signal.aborted; vi++) {
-        const v = variantes[vi];
-        comPesquisa = v.search;
-        g = await chamarGemini(model, v);
-        console.log("SUGERIR-VINHO tentativa:", model, v.label, "->", g.status);
-        if (g.status === 400) continue; // esta variante não é aceite por este modelo — tenta a seguinte
-        break; // sucesso, ou erro definitivo — não continua a testar variantes deste modelo
-      }
-      if (g && g.ok) break;
-      if (g && g.status === 404) { _models = null; continue; } // saiu do catálogo — tenta o modelo seguinte
-      if (g && !transitorio(g.status)) break; // erro definitivo (ex: 400 em todas as variantes) — não vale a pena continuar
-      // transitório (429/500/503): tenta já o modelo seguinte, sem esperar
+    const analiseId = await criarAnaliseRegisto(authHeader, pratoLimpo, ctrl.signal);
+    if (analiseId == null) {
+      await registar("erro", { passo: "criar_registo" }, quem);
+      return json({ error: "não consegui iniciar a análise — tenta outra vez" }, 502);
     }
 
-    if (!g || !g.ok) {
-      const status = g?.status ?? 502;
-      const detail = g ? await g.text() : "";
-      console.error("gemini", model, status, detail.slice(0, 500));
-      let msg = "";
-      try { msg = JSON.parse(detail)?.error?.message ?? ""; } catch (_) { /**/ }
-      await registar("erro", {
-        passo: "gemini", status, modelo: model, pesquisa: comPesquisa,
-        erro: (msg || detail).slice(0, 800),
-      }, quem);
-      if (transitorio(status)) {
-        return json({
-          error: "o serviço está com muita procura agora — espera um minuto e tenta outra vez",
-        }, 503);
-      }
-      return json({ error: `gemini ${status} (${model})${msg ? ": " + msg.slice(0, 200) : ""}` }, 502);
-    }
+    // NÃO faz await — o trabalho pesado continua depois de já se ter
+    // respondido, e sobrevive ao pedido original terminar (ver o comentário
+    // no topo do ficheiro).
+    EdgeRuntime.waitUntil(
+      processarAnalise(partsImg, pratoLimpo, imagens.length, orcamentoNum, quem!, analiseId),
+    );
 
-    const gd = await g.json();
-    const cand = gd?.candidates?.[0];
-    const texto2 = (cand?.content?.parts ?? []).map((p: any) => p?.text ?? "").join("").trim();
-    const parsed: any = extrairJson(texto2);
-    if (!parsed) {
-      console.error("SUGERIR-VINHO resposta ilegível:", texto2.slice(0, 400));
-      await registar("erro", { passo: "json", modelo: model, pesquisa: comPesquisa, amostra: texto2.slice(0, 800) }, quem);
-      return json({ error: "resposta ilegível do modelo — tenta uma foto mais nítida" }, 502);
-    }
-
-    const sugestoes = (Array.isArray(parsed.sugestoes) ? parsed.sugestoes : [])
-      .map(normSugestao).filter(Boolean).slice(0, 5);
-    const vinhosCarta = (Array.isArray(parsed.vinhosCarta) ? parsed.vinhosCarta : [])
-      .map(normVinhoCarta).filter(Boolean).slice(0, 60) as Record<string, unknown>[];
-    const aviso = parsed.aviso ? s(parsed.aviso, 200) : null;
-
-    // Chamada leve à parte, só texto — nunca falha a resposta principal (ver
-    // pedirPontuacoesAprox), só fica sem pontuação aproximada se correr mal.
-    if (vinhosCarta.length && !ctrl.signal.aborted) {
-      const pontuacoes = await pedirPontuacoesAprox(
-        vinhosCarta.map((v) => String(v.nome)),
-        model,
-        ctrl.signal,
-      );
-      vinhosCarta.forEach((v, i) => { v.pontuacaoAprox = pontuacoes[i] ?? null; });
-    }
-
-    const fontes: { titulo: string; url: string }[] = [];
-    (cand?.groundingMetadata?.groundingChunks ?? []).forEach((c: any) => {
-      const w = c?.web;
-      if (w?.uri && !fontes.some((f) => f.url === w.uri)) {
-        fontes.push({ titulo: String(w.title ?? w.uri).slice(0, 80), url: String(w.uri) });
-      }
-    });
-
-    console.log("SUGERIR-VINHO sugestoes:", sugestoes.length, "vinhosCarta:", vinhosCarta.length, "pesquisa:", comPesquisa);
-    await registar("ok", {
-      sugestoes: sugestoes.length, vinhos_carta: vinhosCarta.length, modelo: model,
-      pesquisa: comPesquisa, prato: pratoLimpo, fotos: imagens.length, orcamento: orcamentoNum,
-      pontuacoes_aprox: vinhosCarta.filter((v) => v.pontuacaoAprox != null).length,
-      fontes: fontes.map((f) => f.url).slice(0, 8),
-    }, quem);
-
-    return json({
-      prato: pratoLimpo,
-      orcamento: orcamentoNum,
-      sugestoes,
-      vinhosCarta,
-      aviso,
-      fontes: fontes.slice(0, 8),
-      pesquisa: comPesquisa,
-      modelo: model,
-      geradoEm: new Date().toISOString(),
-    });
+    return json({ id: analiseId, estado: "pendente" }, 202);
   } catch (e) {
     const err = e as Error;
-    const timeout = err.name === "AbortError";
-    await registar("erro", { passo: timeout ? "timeout" : "excecao", erro: String(err.message).slice(0, 500) }, quem);
-    if (timeout) {
-      return json({
-        error: "o modelo demorou demasiado a analisar a carta — tenta outra vez, ou uma foto mais nítida",
-      }, 504);
-    }
+    await registar("erro", { passo: "excecao_inicial", erro: String(err.message).slice(0, 500) }, quem);
     return json({ error: err.message }, 500);
   } finally {
     clearTimeout(timer);
