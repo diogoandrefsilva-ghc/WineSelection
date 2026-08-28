@@ -121,8 +121,8 @@ Devolve APENAS um objeto JSON com esta forma exata:
   "precoAvaliacao": {"classificacao": "barato"|"justo"|"caro"|"muito_caro"|"desconhecido",
     "faixaMercado": string|null, "comentario": string},
   "combinacao": string}],
- "vinhosCarta": [{"nome": string, "tipo": string|null, "regiao": string|null, "preco": number|null,
-  "pontuacaoAprox": number|null}],
+ "vinhosCarta": [{"nome": string, "tipo": "Tinto"|"Branco"|"Rosé"|"Verde"|"Espumante"|"Doce"|"Outro"|null,
+  "regiao": string|null, "preco": number|null, "pontuacaoAprox": number|null}],
  "aviso": string|null}
 
 Regras:
@@ -139,6 +139,10 @@ Regras:
   uma boa escolha geral.
 - "vinhosCarta": TODOS os vinhos que consigas ler na carta (até 40), mesmo os
   que não estão nas sugestões — nome e preço; usa null no que não leres.
+- "vinhosCarta[].tipo": mesmo conjunto de valores que "sugestoes[].tipo"
+  (Tinto/Branco/Rosé/Verde/Espumante/Doce/Outro) — é o que permite distinguir
+  brancos de tintos na lista; usa null só se a carta não deixar perceber nem
+  isso.
 - "vinhosCarta[].pontuacaoAprox": para CADA vinho da lista (não só as
   sugestões), a tua estimativa geral de 0 a 5 (ex.: 3.8) com base no que já
   sabes sobre ele — NÃO precisas de pesquisar um a um, é só uma referência
@@ -235,7 +239,7 @@ function normVinhoCarta(raw: unknown): Record<string, unknown> | null {
   if (!nome) return null;
   return {
     nome,
-    tipo: o.tipo ? s(o.tipo, 30) : null,
+    tipo: TIPOS.includes(o.tipo) ? o.tipo : null,
     regiao: o.regiao ? s(o.regiao, 60) : null,
     preco: numOrNull(o.preco, 0, 5000),
     pontuacaoAprox: numOrNull(o.pontuacaoAprox, 0, 5),

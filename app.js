@@ -246,6 +246,22 @@ const PRECO_INFO={
   desconhecido:{cls:'bg-mu',txt:'Sem dados de preço'}
 };
 
+const TIPO_COR={
+  Tinto:'#6b1230',
+  Branco:'#e2d08a',
+  'Rosé':'#e2879c',
+  Verde:'#9bc26b',
+  Espumante:'#c9d9e0',
+  Doce:'#c9932e',
+  Outro:'#c9bfbc'
+};
+function wsTipoCor(tipo){return TIPO_COR[tipo]||TIPO_COR.Outro;}
+function wsLegendaTipos(vinhos){
+  const tipos=[...new Set(vinhos.map(v=>v.tipo).filter(Boolean))];
+  if(!tipos.length)return '';
+  return `<div class="tipo-legenda">${tipos.map(t=>`<span class="tipo-legenda-item"><span class="tipo-dot" style="background:${wsTipoCor(t)}"></span>${esc(t)}</span>`).join('')}</div>`;
+}
+
 function wsPontuacaoHTML(pontuacao){
   if(!Array.isArray(pontuacao)||!pontuacao.length)return '';
   return `<div class="pont-row">${pontuacao.map(p=>{
@@ -287,7 +303,8 @@ function wsResultadoHTML(d){
     html+=`<div class="ws-card">
       <div class="ws-card-label">Vinhos lidos na carta (${d.vinhosCarta.length})</div>
       <p class="ws-note" style="margin-top:-4px">Pontuação aproximada, sem pesquisa vinho a vinho — só as sugestões acima têm fonte confirmada.</p>
-      <div class="carta-list">${d.vinhosCarta.map(v=>`<div class="carta-item"><span>${esc(v.nome||'')}</span><span class="carta-score">${v.pontuacaoAprox!=null?('⭐ '+Number(v.pontuacaoAprox).toFixed(1)):'—'}</span><span class="carta-preco">${fmtEur(v.preco)}</span></div>`).join('')}</div>
+      ${wsLegendaTipos(d.vinhosCarta)}
+      <div class="carta-list">${d.vinhosCarta.map(v=>`<div class="carta-item"><span class="tipo-dot" style="background:${wsTipoCor(v.tipo)}" title="${esc(v.tipo||'Tipo desconhecido')}"></span><span class="carta-nome">${esc(v.nome||'')}</span><span class="carta-score">${v.pontuacaoAprox!=null?('⭐ '+Number(v.pontuacaoAprox).toFixed(1)):'—'}</span><span class="carta-preco">${fmtEur(v.preco)}</span></div>`).join('')}</div>
     </div>`;
   }
   if(Array.isArray(d.fontes)&&d.fontes.length){
