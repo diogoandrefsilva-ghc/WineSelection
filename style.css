@@ -94,10 +94,15 @@ header{position:sticky;top:0;z-index:50;background:var(--wine);color:#fff;box-sh
 .ws-card h3{font-size:16px;margin-bottom:4px}
 .ws-card-label{font-size:12px;font-weight:700;color:var(--mu);text-transform:uppercase;letter-spacing:.4px;margin-bottom:9px}
 .ws-note{font-size:12.5px;color:var(--mu);line-height:1.55;margin:6px 0}
-.ws-card input[type=text],.ws-card input[type=password]{
+.ws-card input[type=text],.ws-card input[type=password],.ws-card select{
   width:100%;padding:11px 12px;border:1px solid var(--bo);border-radius:10px;font-size:14.5px;background:#fdfbfa;margin-bottom:4px;
 }
-.ws-card input:focus{outline:none;border-color:var(--wine)}
+.ws-card select{
+  appearance:none;-webkit-appearance:none;color:var(--tx);cursor:pointer;padding-right:34px;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238a7a7d' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;background-position:right 10px center;background-size:16px;
+}
+.ws-card input:focus,.ws-card select:focus{outline:none;border-color:var(--wine)}
 .ws-card label{display:block;font-size:11px;font-weight:600;color:var(--mu);text-transform:uppercase;letter-spacing:.4px;margin:12px 0 5px}
 .divi{height:1px;background:var(--bo);margin:14px 0}
 

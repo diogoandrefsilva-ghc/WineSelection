@@ -140,7 +140,16 @@ setTimeout(function(){ if (window.wsEsconderSplash) window.wsEsconderSplash(); }
       <input type="text" id="in-prato" placeholder="ex: bacalhau à Brás, bife grelhado, sushi…">
 
       <div class="ws-card-label" style="margin-top:18px">3. Orçamento máximo por garrafa <em>(opcional)</em></div>
-      <input type="number" id="in-orcamento" min="0" step="0.5" inputmode="decimal" placeholder="ex: 25">
+      <select id="in-orcamento">
+        <option value="">Sem limite</option>
+        <option value="10">10 €</option>
+        <option value="15">15 €</option>
+        <option value="20">20 €</option>
+        <option value="25">25 €</option>
+        <option value="30">30 €</option>
+        <option value="40">40 €</option>
+        <option value="50">50 €</option>
+      </select>
 
       <button class="btn-prim" id="btn-sugerir" onclick="wsSugerir()" style="margin-top:18px" disabled>🍷 Sugerir vinho</button>
       <div id="sugerir-status" class="ws-note" style="display:none"></div>

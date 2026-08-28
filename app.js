@@ -203,9 +203,8 @@ async function wsImagensEscolhidas(event){
 async function wsSugerir(){
   if(!_wsImagens.length){toast('Escolhe primeiro uma foto da carta',1);return;}
   const prato=document.getElementById('in-prato').value.trim();
-  const orcamentoRaw=document.getElementById('in-orcamento').value.trim();
-  const orcamentoNum=orcamentoRaw?parseFloat(orcamentoRaw.replace(',','.')):NaN;
-  const orcamento=(isFinite(orcamentoNum)&&orcamentoNum>0)?orcamentoNum:null;
+  const orcamentoRaw=document.getElementById('in-orcamento').value;
+  const orcamento=orcamentoRaw?parseFloat(orcamentoRaw):null;
   const btn=document.getElementById('btn-sugerir');
   const status=document.getElementById('sugerir-status');
   btn.disabled=true;const btnTxtOrig=btn.textContent;btn.textContent='A analisar a carta…';
