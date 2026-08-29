@@ -243,6 +243,7 @@ function normSugestao(raw: unknown): Record<string, unknown> | null {
     pontuacao: normPontuacao(o.pontuacao),
     precoAvaliacao: normPrecoAvaliacao(o.precoAvaliacao),
     combinacao: s(o.combinacao, 400),
+    coerencia: null as Record<string, unknown> | null, // preenchido por verificarCoerencia()
   };
 }
 function normVinhoCarta(raw: unknown): Record<string, unknown> | null {
@@ -257,6 +258,131 @@ function normVinhoCarta(raw: unknown): Record<string, unknown> | null {
     preco: numOrNull(o.preco, 0, 5000),
     pontuacaoAprox: null as number | null, // preenchido depois por pedirPontuacoesAprox()
   };
+}
+
+/* ── Coerência entre a sugestão e a carta que o modelo leu ──
+   O modelo lê a carta E escolhe o vinho na mesma passagem: nada garante que
+   o vinho recomendado seja um dos que ele próprio transcreveu para
+   `vinhosCarta`, nem que o `precoCarta` que anuncia seja o preço que está
+   impresso. É a falha que custa mais caro à mesa — pedir um vinho que não
+   existe na carta, ou contar com 24€ e ver 38€ na conta — e é a única que se
+   confirma sem gastar nem mais uma chamada ao Gemini: basta comparar as duas
+   partes da resposta uma com a outra, aqui, em código.
+
+   Não se apaga nenhuma sugestão por falhar isto: o emparelhamento é por
+   nome, aproximado, e um falso negativo nosso a esconder o melhor vinho da
+   carta seria pior do que o aviso. Marca-se, e quem está à mesa tem o menu
+   na mão para confirmar num segundo. */
+const ABREVIATURAS: Record<string, string> = {
+  qta: "quinta", qtas: "quintas", hrd: "herdade", sto: "santo", sta: "santa",
+};
+// Sem valor para distinguir vinhos — "Quinta do X" e "Quinta do Y" não são o
+// mesmo vinho só por partilharem "quinta".
+const VAZIAS = new Set([
+  "de", "do", "da", "dos", "das", "e", "o", "a", "os", "as", "um", "uma",
+  "vinho", "vinhos", "wine",
+]);
+const GENERICAS = new Set([
+  "quinta", "herdade", "casa", "adega", "monte", "vinha", "vinhas", "conde",
+  "dom", "reserva", "colheita", "grande", "velhas", "regional", "doc",
+]);
+
+function tokensNome(n: unknown): string[] {
+  return String(n ?? "")
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")   // tira acentos
+    .toLowerCase()
+    .replace(/\b(?:19|20)\d{2}\b/g, " ")                // a colheita não distingue aqui
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .split(" ")
+    .map((t) => ABREVIATURAS[t] ?? t)
+    .filter((t) => t && !VAZIAS.has(t));
+}
+
+function precoIgual(a: unknown, b: unknown): boolean {
+  return typeof a === "number" && typeof b === "number" && Math.abs(a - b) < 0.5;
+}
+
+/* Emparelha uma sugestão com a entrada da carta a que corresponde. Devolve
+   também a confiança (0-1) e se o emparelhamento foi ambíguo — só um
+   emparelhamento forte E único autoriza usar o preço lido para preencher um
+   `precoCarta` em falta. */
+function encontrarNaCarta(
+  sug: Record<string, unknown>,
+  vinhos: Record<string, unknown>[],
+): { vinho: Record<string, unknown>; conf: number; ambiguo: boolean } | null {
+  const ts = tokensNome(sug.nome);
+  if (!ts.length) return null;
+  const cands: { vinho: Record<string, unknown>; conf: number }[] = [];
+
+  for (const v of vinhos) {
+    // Tipos conhecidos e diferentes: o Papa Figos branco não é o tinto.
+    // "Outro" (e null) é ausência de informação, não um tipo em conflito.
+    const tipoSug = sug.tipo === "Outro" ? null : sug.tipo;
+    const tipoV = v.tipo === "Outro" ? null : v.tipo;
+    if (tipoSug && tipoV && tipoSug !== tipoV) continue;
+    const tv = tokensNome(v.nome);
+    if (!tv.length) continue;
+    const comuns = ts.filter((t) => tv.includes(t));
+    // Um único token em comum só chega se for um nome próprio — caso
+    // contrário "Quinta do Crasto" casava com "Quinta da Romaneira".
+    const especifico = comuns.length === 1 && comuns[0].length >= 5 && !GENERICAS.has(comuns[0]);
+    if (comuns.length < 2 && !especifico) continue;
+    // Contenção, não Jaccard: "Crasto" está contido em "Quinta do Crasto
+    // Reserva" e é de propósito que isso conta como emparelhamento.
+    const conf = comuns.length / Math.min(ts.length, tv.length);
+    if (conf < 0.6) continue;
+    cands.push({ vinho: v, conf });
+  }
+  if (!cands.length) return null;
+
+  cands.sort((x, y) => y.conf - x.conf);
+  const topo = cands.filter((c) => c.conf >= cands[0].conf - 0.001);
+  // Empate (ex.: "Quinta do Crasto" com a gama base E a Reserva na mesma
+  // carta): o preço desempata melhor do que a ordem em que vieram. Se nem o
+  // preço desempatar, fica marcado ambíguo — escolhe-se um para poder dizer
+  // que o vinho existe na carta, mas nada dali serve para preencher preços.
+  const porPreco = topo.find((c) => precoIgual(c.vinho.preco, sug.precoCarta));
+  const escolhido = porPreco ?? topo[0];
+  return { ...escolhido, ambiguo: !porPreco && topo.length > 1 };
+}
+
+/* Anota cada sugestão com o que se conseguiu confirmar contra a carta lida.
+   `naCarta: null` = não havia carta contra que verificar (não é o mesmo que
+   "não está lá"). `precoCartaLido` só vem preenchido quando DISCORDA do
+   `precoCarta` anunciado — é um aviso, não um dado a mostrar sempre. */
+function verificarCoerencia(
+  sugestoes: Record<string, unknown>[],
+  vinhosCarta: Record<string, unknown>[],
+): { semCarta: number; precoErrado: number; precoPreenchido: number } {
+  const contas = { semCarta: 0, precoErrado: 0, precoPreenchido: 0 };
+  for (const sug of sugestoes) {
+    if (!vinhosCarta.length) {
+      sug.coerencia = { naCarta: null, precoCartaLido: null };
+      continue;
+    }
+    const m = encontrarNaCarta(sug, vinhosCarta);
+    if (!m) {
+      contas.semCarta++;
+      sug.coerencia = { naCarta: false, precoCartaLido: null };
+      continue;
+    }
+    const lido = typeof m.vinho.preco === "number" ? m.vinho.preco as number : null;
+    let precoCartaLido: number | null = null;
+    if (lido != null) {
+      if (sug.precoCarta == null) {
+        // O preço estava em falta na sugestão mas foi lido na carta — só se
+        // aproveita com um emparelhamento forte e sem empate, senão é melhor
+        // ficar "—" do que arriscar mostrar o preço da gama errada.
+        if (m.conf >= 0.9 && !m.ambiguo) { sug.precoCarta = lido; contas.precoPreenchido++; }
+      } else if (!precoIgual(lido, sug.precoCarta)) {
+        precoCartaLido = lido;
+        contas.precoErrado++;
+      }
+    }
+    sug.coerencia = { naCarta: true, precoCartaLido };
+  }
+  return contas;
 }
 
 /* Segunda chamada, leve e SEM imagens nem pesquisa — só texto com os nomes já
@@ -518,10 +644,14 @@ async function processarAnalise(
     }
 
     const sugestoes = (Array.isArray(parsed.sugestoes) ? parsed.sugestoes : [])
-      .map(normSugestao).filter(Boolean).slice(0, 5);
+      .map(normSugestao).filter(Boolean).slice(0, 5) as Record<string, unknown>[];
     const vinhosCarta = (Array.isArray(parsed.vinhosCarta) ? parsed.vinhosCarta : [])
       .map(normVinhoCarta).filter(Boolean).slice(0, 60) as Record<string, unknown>[];
     const aviso = parsed.aviso ? s(parsed.aviso, 200) : null;
+
+    // Confronta o que foi recomendado com o que foi lido — em código, sem
+    // mais nenhuma chamada ao modelo (ver verificarCoerencia).
+    const coerencia = verificarCoerencia(sugestoes, vinhosCarta);
 
     // Chamada leve à parte, só texto — nunca falha a análise principal (ver
     // pedirPontuacoesAprox), só fica sem pontuação aproximada se correr mal.
@@ -547,6 +677,9 @@ async function processarAnalise(
       sugestoes: sugestoes.length, vinhos_carta: vinhosCarta.length, modelo: model,
       pesquisa: comPesquisa, prato: pratoLimpo, fotos: nImagens, orcamento: orcamentoNum,
       pontuacoes_aprox: vinhosCarta.filter((v) => v.pontuacaoAprox != null).length,
+      coerencia_sem_carta: coerencia.semCarta,
+      coerencia_preco_errado: coerencia.precoErrado,
+      coerencia_preco_preenchido: coerencia.precoPreenchido,
       fontes: fontes.map((f) => f.url).slice(0, 8),
     }, quem);
 

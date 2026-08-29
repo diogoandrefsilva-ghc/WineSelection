@@ -428,6 +428,22 @@ function wsPontuacaoHTML(pontuacao){
   }).join('')}</div>`;
 }
 
+/* Avisos da verificação feita em código na Edge Function (verificarCoerencia
+   em sugerir-vinho.ts): o vinho recomendado não aparece na carta que o
+   próprio modelo transcreveu, ou o preço anunciado não bate certo com o que
+   foi lido. Não escondemos a sugestão por causa disto — o emparelhamento é
+   por nome e pode falhar — mas quem está à mesa tem o menu na mão e confirma
+   num segundo. */
+function wsCoerenciaHTML(v){
+  const co=v&&v.coerencia;
+  if(!co)return '';
+  const avisos=[];
+  if(co.naCarta===false)avisos.push('Não encontrei este vinho na lista que li da carta — confirma no menu antes de pedires.');
+  if(co.precoCartaLido!=null)avisos.push('Na carta li '+fmtEur(co.precoCartaLido)+' para este vinho — confirma o preço.');
+  if(!avisos.length)return '';
+  return `<div class="vinho-alerta">${avisos.map(a=>`<p>⚠️ ${esc(a)}</p>`).join('')}</div>`;
+}
+
 function wsVinhoCardHTML(v,destaque){
   const pi=PRECO_INFO[(v.precoAvaliacao&&v.precoAvaliacao.classificacao)||'desconhecido']||PRECO_INFO.desconhecido;
   const sub=[v.tipo,v.regiao,v.casta].filter(Boolean).map(esc).join(' · ');
@@ -440,6 +456,7 @@ function wsVinhoCardHTML(v,destaque){
       </div>
       <div class="vinho-preco">${fmtEur(v.precoCarta)}</div>
     </div>
+    ${wsCoerenciaHTML(v)}
     ${wsPontuacaoHTML(v.pontuacao)}
     <div class="preco-badge ${pi.cls}">${pi.txt}${v.precoAvaliacao&&v.precoAvaliacao.faixaMercado?` · ref. ${esc(v.precoAvaliacao.faixaMercado)}`:''}</div>
     ${v.precoAvaliacao&&v.precoAvaliacao.comentario?`<p class="vinho-txt">${esc(v.precoAvaliacao.comentario)}</p>`:''}

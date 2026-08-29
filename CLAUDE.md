@@ -124,6 +124,37 @@ Junta duas técnicas já usadas noutras apps do mesmo projeto:
   `user_email=eq.<quem>`, mesmo a service role tendo acesso a tudo, para só
   poder mexer na linha do próprio dono.
 
+## Coerência: a sugestão bate certo com a carta?
+O modelo lê a carta E escolhe o vinho na mesma passagem — nada garante que o
+vinho recomendado seja um dos que ele próprio transcreveu para `vinhosCarta`,
+nem que o `precoCarta` anunciado seja o preço impresso. É a falha que custa
+mais caro a quem está à mesa (pedir um vinho que não existe, ou contar com
+24€ e ver 38€ na conta) e é a única que se confirma **sem gastar mais uma
+chamada ao Gemini**: `verificarCoerencia` (em `sugerir-vinho.ts`) confronta
+as duas metades da resposta uma com a outra, em código, e anota cada
+sugestão com `coerencia:{naCarta,precoCartaLido}`.
+- Emparelhamento por nome normalizado (sem acentos nem colheita, com
+  `qta.`→`quinta`), por contenção de tokens — "Crasto" casa com "Quinta do
+  Crasto Reserva", de propósito. Palavras genéricas (`quinta`, `herdade`,
+  `reserva`, …) não chegam sozinhas para casar, senão "Quinta do Crasto"
+  casava com "Quinta da Romaneira". Tipos conhecidos e diferentes nunca
+  casam (o Papa Figos branco não é o tinto).
+- Empate (a gama base E a Reserva do mesmo produtor na carta) desempata-se
+  pelo preço; se nem o preço desempatar fica `ambiguo` e daí não se aproveita
+  preço nenhum.
+- **Nunca se apaga uma sugestão por falhar isto** — o emparelhamento é
+  aproximado e um falso negativo a esconder o melhor vinho da carta seria
+  pior do que o aviso. Marca-se, e a app mostra um aviso no cartão
+  (`wsCoerenciaHTML`); quem está à mesa tem o menu na mão para confirmar.
+- `naCarta:null` significa "não havia carta contra que verificar", que não é
+  o mesmo que "não está lá".
+- Bónus: se a sugestão vier sem `precoCarta` mas o vinho for encontrado na
+  carta com preço, o preço é preenchido — mas só com emparelhamento forte
+  (≥0.9) e sem ambiguidade.
+- As contas de cada análise ficam no `sync_log`
+  (`coerencia_sem_carta`/`coerencia_preco_errado`/`coerencia_preco_preenchido`)
+  — é por aí que se vê se isto é um problema frequente ou raro.
+
 ## A Edge Function `verificar-vinhos`
 Nasceu de uma limitação conhecida: `vinhosCarta[].pontuacaoAprox` (todos os
 vinhos da carta, não só as sugestões) é uma estimativa de memória do
@@ -180,7 +211,8 @@ A forma de `resultado` (a coluna jsonb, dentro da linha de `analises`):
 ```
 { prato, orcamento, sugestoes:[{nome,tipo,regiao,casta,precoCarta,
     pontuacao:[{fonte,valor,escala,url}],
-    precoAvaliacao:{classificacao,faixaMercado,comentario}, combinacao}],
+    precoAvaliacao:{classificacao,faixaMercado,comentario}, combinacao,
+    coerencia:{naCarta,precoCartaLido}}],
   vinhosCarta:[{nome,tipo,regiao,preco,pontuacaoAprox}], aviso,
   fontes:[{titulo,url}], pesquisa, modelo, geradoEm }
 ```
@@ -192,6 +224,9 @@ mais leve, sem pesquisa vinho a vinho, para não voltar a estourar o tempo
 de resposta com cartas grandes. Se mexeres neste contrato, mexe em três
 sítios (`sugerir-vinho.ts`, `wsResultadoHTML`/`wsVinhoCardHTML` em `app.js`,
 e o `resultado jsonb` de `db/schema.sql`).
+
+`sugestoes[].coerencia` não vem do Gemini — é calculada em código pela
+própria função (`verificarCoerencia`), ver abaixo.
 
 ## Regras técnicas (não partir a app)
 - `app.js` carrega como `<script src>` **normal, NÃO module** — há
