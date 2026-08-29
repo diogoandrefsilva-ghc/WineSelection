@@ -289,7 +289,7 @@ const GENERICAS = new Set([
 
 function tokensNome(n: unknown): string[] {
   return String(n ?? "")
-    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")   // tira acentos
+    .normalize("NFD").replace(/\p{M}/gu, "")   // NFD + tira as marcas -> "é" fica "e"
     .toLowerCase()
     .replace(/\b(?:19|20)\d{2}\b/g, " ")                // a colheita não distingue aqui
     .replace(/[^a-z0-9]+/g, " ")
