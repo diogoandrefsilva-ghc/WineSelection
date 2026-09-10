@@ -831,11 +831,11 @@ async function processarAnalise(
     const texto = prompt(pratoLimpo, nImagens, orcamentoNum);
     const parts: unknown[] = [...partsImg, { text: texto }];
 
-    /* Cada variante é uma forma de pedir a mesma coisa. Ordem por velocidade
-       esperada, não por qualidade — com imagens (1 a 6) + grounding, o
-       "thinking" por omissão dos modelos 2.5 é um custo de latência grande,
-       por isso a 1ª tentativa já vem sempre com thinkingBudget:0. */
-    /* A 1ª variante era `pesquisa + thinkingBudget:0` e foi-se embora: pedir
+    /* Cada variante é uma forma de pedir a mesma coisa, por ordem de
+       preferência: primeiro COM pesquisa (é o que sustenta as pontuações),
+       e só se o modelo a recusar é que se cai na versão sem ela.
+
+       A 1ª variante era `pesquisa + thinkingBudget:0` e foi-se embora: pedir
        para não pensar AO MESMO TEMPO que se liga o tool `google_search`
        passou a ser recusado com 400 ("Request contains an invalid
        argument") pelos modelos que ficaram por trás dos ponteiros
