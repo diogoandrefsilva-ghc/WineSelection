@@ -164,6 +164,14 @@ chamada leve (ver acima). Em vez de resolver isso "à bruta", esta função dá
 ao utilizador a opção de pagar o custo da pesquisa real só para os vinhos
 que ele escolher à mão na lista (até 5) — o resto da carta continua a usar
 só a estimativa aproximada.
+- **O catálogo partilhado responde primeiro** (ver a secção própria): os
+  vinhos que já lá estão COMPLETOS (nota pesquisada **e** preço de mercado)
+  saem sem Gemini nenhum. Exige-se as duas coisas de propósito — meia
+  resposta era pior do que pesquisar, que quem escolheu estes cinco vinhos
+  à mão escolheu-os porque quer saber. Continua a ser verificação a sério:
+  o que está no catálogo foi lá posto por uma pesquisa a sério, e a
+  `catalogo.forca()` não deixa entrar estimativas de memória. O resultado
+  traz `origem:'catalogo'` e a data, e a app diz-o.
 - Mesma arquitetura assíncrona da `sugerir-vinho` (`EdgeRuntime.waitUntil` +
   polling), mas mexe na MESMA linha de `wineselection.analises` — só em
   três colunas à parte: `verificacao_estado`/`verificacao`/
@@ -191,6 +199,67 @@ sonda a mesma linha de `analises` até `verificacao_estado` mudar para
 na MESMA forma de `sugestoes[].pontuacao`/`precoAvaliacao`) ou `'erro'`
 (lê `verificacao_erro`).
 
+## O catálogo partilhado com a Garrafeira (não pagar duas vezes o mesmo)
+Há uma segunda app de vinhos no mesmo projeto Supabase — a **Garrafeira** —
+e as duas faziam a mesma pergunta ao Gemini sobre os mesmos vinhos, cada uma
+por sua conta. O schema **`catalogo`** é a memória comum: o que já se
+pesquisou (nas duas apps) e o que alguém já confirmou por ter a garrafa em
+casa. **Fonte de verdade: `db/catalogo-partilhado.sql` no repo Garrafeira**
+— não há cópia aqui de propósito (ver `db/README.md`).
+
+Onde é que isto entra nesta app, e o que muda:
+
+- **`sugerir-vinho`** — a `pontuacaoAprox` de toda a carta era sempre uma
+  SEGUNDA chamada ao Gemini, a estimar ~40 vinhos de memória. Agora
+  pergunta-se primeiro ao catálogo (`catalogo.procurar_lote`, **uma** ida ao
+  PostgREST para a carta toda): os vinhos que alguém já pesquisou a sério
+  respondem já, e ao Gemini vão só os que sobram. Quando não sobra nenhum,
+  essa chamada não acontece.
+- **`verificar-vinhos`** — a mais cara das três (pesquisa Google a sério).
+  Os vinhos que o catálogo já tem COMPLETOS respondem sem Gemini nenhum.
+- as duas **escrevem** o que descobrem, no fim e depois de a linha de
+  `analises` estar fechada: quem está à espera não espera pelo catálogo, e
+  se ele falhar não estraga nada. **Nada disto pode deitar uma análise
+  abaixo** — é uma poupança, não uma dependência, e daí os `try/catch` a
+  engolir tudo.
+
+**A `pontuacaoAprox` NUNCA entra no catálogo.** É a regra que segura o
+resto. Ela é uma estimativa de memória, sem pesquisa, e esta app inteira
+está construída à volta de não a disfarçar de verificação — deixá-la entrar
+aqui era pior do que isso: era espalhá-la pelas duas apps com ar de facto
+pesquisado, e depois já ninguém sabia de onde tinha vindo. A
+`catalogo.forca()` do lado do SQL recusa-a mesmo que um dia alguém tente
+mandá-la. Só `sugestoes[].pontuacao` (que vem com pesquisa e fonte) e a
+`verificar-vinhos` é que escrevem.
+
+**O "barato/justo/caro" também não entra, e por outra razão:** não é do
+vinho, é de uma CARTA. O mesmo Papa Figos é barato a 22 € e caro a 45 €, e
+nem o vinho mudou. O que atravessa é o preço de MERCADO (`preco_medio`), e a
+comparação com a carta refaz-se sempre em código — `avaliarPreco` em
+`verificar-vinhos.ts`, com os cortes escritos à vista (2 a 3 vezes o preço
+de loja é o normal num restaurante) e a conta no próprio comentário que vai
+para o ecrã. É mais honesto do que a opinião do modelo: quem está à mesa vê
+a conta e discorda dela se quiser.
+
+**A chave (o que faz dois vinhos serem o mesmo vinho) vive só no SQL.**
+Daqui vai o nome e o ano em cru. Chegou a estar repetida em TypeScript nas
+três Edge Functions com um aviso a dizer para as manter iguais — e um aviso
+desses é uma dívida à espera: no dia em que uma divergisse, o catálogo
+partia-se em dois em silêncio e a única coisa que se notava era a conta a
+não descer. Uma cópia só não pode divergir.
+
+`anoDoNome()` é o que tira a colheita de "Papa Figos 2020": com ano, a
+resposta é a nota DAQUELA colheita; sem ele, é a de uma recente e o
+catálogo diz qual — a app mostra-o (`.carta-ano`), que sem isso era dar uma
+nota sem se saber de que garrafa é.
+
+**Na UI, uma nota pesquisada e um palpite não podem parecer a mesma coisa**
+(`pontuacaoOrigem`, `wsScoreTxt`, `wsNotaDaLista`): a do catálogo fica
+dourada e com a colheita ao lado, a estimativa fica cinzenta e com um `~` à
+frente. E uma verificação que volta num instante ganha uma linha a dizer
+porquê (`wsVerifOrigemHTML`) — sem ela parece uma resposta a fingir, e não
+é: já tinha sido paga.
+
 ## Contrato do pedido e da resposta (o que `app.js` envia/espera)
 Pedido: `POST /functions/v1/sugerir-vinho` com
 `{imagens:[{data,mime}], prato, orcamento}` — `orcamento` é o preço máximo
@@ -213,15 +282,20 @@ A forma de `resultado` (a coluna jsonb, dentro da linha de `analises`):
     pontuacao:[{fonte,valor,escala,url}],
     precoAvaliacao:{classificacao,faixaMercado,comentario}, combinacao,
     coerencia:{naCarta,precoCartaLido}}],
-  vinhosCarta:[{nome,tipo,regiao,preco,pontuacaoAprox}], aviso,
+  vinhosCarta:[{nome,tipo,regiao,preco,pontuacaoAprox,
+    pontuacaoOrigem,pontuacaoAno,pontuacaoUrl}], aviso,
   fontes:[{titulo,url}], pesquisa, modelo, geradoEm }
 ```
 `sugestoes[].pontuacao` é sempre confirmada por pesquisa Google (fonte real,
 com URL) — é o que sustenta a avaliação de preço. Já
-`vinhosCarta[].pontuacaoAprox` é uma estimativa geral do modelo, de memória,
-para TODOS os vinhos lidos na carta (não só as sugestões) — de propósito
-mais leve, sem pesquisa vinho a vinho, para não voltar a estourar o tempo
-de resposta com cartas grandes. Se mexeres neste contrato, mexe em três
+`vinhosCarta[].pontuacaoAprox` tem DUAS origens possíveis, e é o
+`pontuacaoOrigem` que diz qual: `'catalogo'` é uma nota pesquisada a sério
+que já existia (ver o catálogo partilhado, acima) e vem com `pontuacaoAno`
+(a colheita a que pertence) e `pontuacaoUrl`; `'estimativa'` é o palpite
+geral do modelo, de memória, sem pesquisa vinho a vinho — de propósito mais
+leve, para não voltar a estourar o tempo de resposta com cartas grandes. Um
+resultado antigo, de antes disto, não tem `pontuacaoOrigem` — e a app trata
+a ausência como estimativa, que é o que era. Se mexeres neste contrato, mexe em três
 sítios (`sugerir-vinho.ts`, `wsResultadoHTML`/`wsVinhoCardHTML` em `app.js`,
 e o `resultado jsonb` de `db/schema.sql`).
 

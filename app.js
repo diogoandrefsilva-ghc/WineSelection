@@ -464,6 +464,31 @@ function wsVinhoCardHTML(v,destaque){
   </div>`;
 }
 
+/* ── De onde vem cada nota da lista da carta ──
+   Duas coisas MUITO diferentes vivem na mesma coluna e não podem parecer a
+   mesma:
+   · `pontuacaoOrigem:'catalogo'` — o vinho já foi pesquisado a sério (nesta
+     app ou na Garrafeira, por mim ou por outra pessoa) e a nota é essa,
+     com fonte. É melhor do que a estimativa E não custou nada;
+   · `pontuacaoOrigem:'estimativa'` — o palpite de memória do modelo, sem
+     pesquisa nenhuma. É o que sempre foi, e continua a valer o que vale.
+   Marcá-las igual seria o caminho fácil e seria mentira; daí o `~` na
+   estimativa e a nota pesquisada a aparecer como as outras.  */
+function wsScoreTxt(v){
+  if(v.pontuacaoAprox==null)return '—';
+  const n=Number(v.pontuacaoAprox).toFixed(1);
+  if(v.pontuacaoOrigem==='catalogo'){
+    const ano=v.pontuacaoAno?(' '+v.pontuacaoAno):'';
+    return '⭐ '+n+'<span class="carta-ano">'+esc(ano)+'</span>';
+  }
+  return '~'+n;   // um til é a diferença entre "sabe-se" e "acha-se"
+}
+function wsNotaDaLista(vinhos){
+  const n=(vinhos||[]).filter(v=>v.pontuacaoOrigem==='catalogo').length;
+  if(!n)return 'Pontuação aproximada (<b>~</b>), de memória e sem pesquisa vinho a vinho — só as sugestões acima têm fonte confirmada.';
+  return '<b>⭐ '+n+'</b> '+(n===1?'já foi pesquisado':'já foram pesquisados')+' a sério (aqui ou na garrafeira) — essa nota tem fonte. O resto (<b>~</b>) é aproximado, de memória e sem pesquisa.';
+}
+
 function wsResultadoHTML(d,opts){
   opts=opts||{};
   const analiseId=opts.analiseId;
@@ -477,13 +502,13 @@ function wsResultadoHTML(d,opts){
     if(podeVerificar)_wsVinhosPorAnalise[analiseId]=d.vinhosCarta;
     html+=`<div class="ws-card">
       <div class="ws-card-label">Vinhos lidos na carta (${d.vinhosCarta.length})</div>
-      <p class="ws-note" style="margin-top:-4px">Pontuação aproximada, sem pesquisa vinho a vinho — só as sugestões acima têm fonte confirmada${podeVerificar?'. Escolhe até 5 para uma pesquisa a sério:':'.'}</p>
+      <p class="ws-note" style="margin-top:-4px">${wsNotaDaLista(d.vinhosCarta)}${podeVerificar?' Escolhe até 5 para uma pesquisa a sério:':''}</p>
       ${wsLegendaTipos(d.vinhosCarta)}
       <div class="carta-list">${d.vinhosCarta.map(v=>`<div class="carta-item">
         ${podeVerificar?`<input type="checkbox" class="carta-check" data-analise="${analiseId}" data-nome="${esc(v.nome)}" onchange="wsVerifToggle(this)">`:''}
         <span class="tipo-dot" style="background:${wsTipoCor(v.tipo)}" title="${esc(v.tipo||'Tipo desconhecido')}"></span>
         <span class="carta-nome">${esc(v.nome||'')}</span>
-        <span class="carta-score">${v.pontuacaoAprox!=null?('⭐ '+Number(v.pontuacaoAprox).toFixed(1)):'—'}</span>
+        <span class="carta-score${v.pontuacaoOrigem==='catalogo'?' conhecida':''}">${wsScoreTxt(v)}</span>
         <span class="carta-preco">${fmtEur(v.preco)}</span>
       </div>`).join('')}</div>
       ${podeVerificar?`<div class="verif-bar">
@@ -592,10 +617,23 @@ async function wsVerifPollTick(analiseId,inicio){
   }
 }
 
+/* Uma verificação que volta num instante e sem espera nenhuma parece um
+   erro — parece que ninguém foi pesquisar nada. Foi: já tinha sido, e o
+   catálogo partilhado guardou-a. Dizer quando é que foi (e de que colheita
+   é a nota) é o que separa isto de uma resposta a fingir. */
+function wsVerifOrigemHTML(v){
+  if(v.origem!=='catalogo')return '';
+  const d=v.origemEm?new Date(v.origemEm):null;
+  const quando=(d&&!isNaN(d))?d.toLocaleDateString('pt-PT',{day:'2-digit',month:'short',year:'numeric'}):'';
+  const ano=v.origemAno?(' · colheita de '+v.origemAno):'';
+  return `<div class="verif-origem">✓ Já pesquisado${quando?' em '+esc(quando):''}${esc(ano)} — não foi preciso pesquisar outra vez.</div>`;
+}
+
 function wsVerifCardHTML(v){
   const pi=PRECO_INFO[(v.precoAvaliacao&&v.precoAvaliacao.classificacao)||'desconhecido']||PRECO_INFO.desconhecido;
   return `<div class="vinho-card verif-card">
     <div class="vinho-nome">${esc(v.nome||'')}</div>
+    ${wsVerifOrigemHTML(v)}
     ${wsPontuacaoHTML(v.pontuacao)}
     <div class="preco-badge ${pi.cls}">${pi.txt}${v.precoAvaliacao&&v.precoAvaliacao.faixaMercado?` · ref. ${esc(v.precoAvaliacao.faixaMercado)}`:''}</div>
     ${v.precoAvaliacao&&v.precoAvaliacao.comentario?`<p class="vinho-txt">${esc(v.precoAvaliacao.comentario)}</p>`:''}
