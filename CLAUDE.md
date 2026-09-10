@@ -78,7 +78,34 @@ Junta duas técnicas já usadas noutras apps do mesmo projeto:
   irmãs): pergunta-se à API que "flash" a chave tem disponíveis, tenta-se
   por ordem, com retry em erros transitórios (429/500/503) e um 400 (nome de
   campo recusado) tenta-se sem pesquisa uma vez antes de desistir desse
-  modelo.
+  modelo. **Em `ESTAVEIS` só entram PONTEIROS (`-latest`)** — lá estiveram
+  "gemini-2.5-flash" e "gemini-2.0-flash", e são exatamente os nomes que a
+  Google reformou: respondem 404 "no longer available to new users".
+  Ficavam por baixo do ponteiro (que responde primeiro), por isso não davam
+  erro visível — só deixavam a escada com dois degraus podres para o dia em
+  que o ponteiro desse 429.
+- **`thinkingBudget:0` NUNCA com o tool `google_search`.** A API recusa as
+  duas juntas com 400 ("Request contains an invalid argument"): a pesquisa
+  precisa de pensar para decidir o que pesquisar. Era a PRIMEIRA variante
+  tentada nas duas funções — não partia nada (o loop caía na seguinte), só
+  deitava fora uma ida ao Gemini em cada análise e em cada verificação, sem
+  nada no ecrã a dizê-lo. Na `sugerir-vinho` a trave é o `&& !v.search` no
+  `chamarGemini`; na `verificar-vinhos`, onde a pesquisa está sempre
+  ligada, a variante deixou simplesmente de existir.
+- **Duas chamadas, DOIS modelos.** A pesada (fotos + grounding) precisa do
+  `flash`; a leve (`pedirPontuacoesAprox`, só uma lista de nomes a pedir um
+  número de 0 a 5) corre no `MODELO_LEVE` — o `flash-lite`, que é o que a
+  Garrafeira usa como primeira escolha em tudo. Se o lite falhar repete-se
+  no modelo que já respondeu: trocar de modelo não pode ser um caminho novo
+  para ficar sem pontuações nenhumas.
+- **Cada análise regista o que gastou** (`usageMetadata` somado das duas
+  chamadas, `chamadas_gemini`, `custo_estimado_eur`) no `sync_log`, como já
+  fazia a Garrafeira. Os TOKENS são facto — vêm da API; o EURO é uma
+  estimativa grosseira (`CUSTO_ANALISE_EUR`/`CUSTO_LEVE_EUR`), não um preço
+  publicado, e a pesquisa Google é faturada à parte por pedido. Sem isto
+  não havia como responder à pergunta que o catálogo partilhado veio pôr:
+  está a poupar quanto? Uma verificação servida só pelo catálogo regista
+  `custo_estimado_eur: 0` — é esse o número que interessa ver a crescer.
 - **Autorização**: verifica o JWT (`verify_jwt` ligado no deploy) e depois
   confirma que o email consta de `wineselection.allowed_users` — qualquer
   utilizador aprovado pode chamar (ao contrário da `calendario-sporting`,
@@ -259,6 +286,25 @@ dourada e com a colheita ao lado, a estimativa fica cinzenta e com um `~` à
 frente. E uma verificação que volta num instante ganha uma linha a dizer
 porquê (`wsVerifOrigemHTML`) — sem ela parece uma resposta a fingir, e não
 é: já tinha sido paga.
+
+## As lições da Garrafeira têm de atravessar para cá
+As duas apps falam com a MESMA API, com a MESMA chave, e cada Edge Function
+deste projeto é auto-contida de propósito (ver a convenção acima). A
+duplicação é intencional; o que não pode ser é o CONHECIMENTO ficar só de
+um lado.
+
+Aconteceu duas vezes seguidas: a Garrafeira apanhou os 404 dos nomes fixos
+(1 de setembro) e os 400 do `thinkingBudget:0` com pesquisa (10 de
+setembro), corrigiu-se, e a WineSelection ficou com as duas avarias
+intactas durante semanas. Nenhuma dava erro visível — e a WineSelection não
+corria desde 29 de agosto, por isso o log dela estava limpo. **Um log limpo
+numa app que não corre não é saúde, é desuso**, e foi só por isso que
+ninguém deu por nada.
+
+Por isso: quando mexeres na escolha de modelo, nos parâmetros da chamada ou
+no tratamento de erros do Gemini de UM lado, vai ver o outro no MESMO dia.
+O `sync_log` das duas apps é o sítio onde isso se confirma — compara a
+última chamada de cada uma antes de assumir que a que está calada está bem.
 
 ## Contrato do pedido e da resposta (o que `app.js` envia/espera)
 Pedido: `POST /functions/v1/sugerir-vinho` com

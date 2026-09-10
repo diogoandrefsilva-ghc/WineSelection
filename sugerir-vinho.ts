@@ -277,6 +277,59 @@ function normVinhoCarta(raw: unknown): Record<string, unknown> | null {
   };
 }
 
+/* ── O QUE ISTO GASTOU ──
+   A Garrafeira já contava os tokens de cada procura e esta app não contava
+   nada — sendo a mais CARA das duas por chamada (fotos + pesquisa Google).
+   Sem isto não há maneira de responder à única pergunta que interessa
+   agora que existe o catálogo partilhado: está a poupar quanto?
+
+   `usageMetadata` vem da própria API e é FACTO. A `sugerir-vinho` faz até
+   duas chamadas por análise (a pesada e a leve das pontuações), por isso
+   somam-se — uma só das duas contava metade da história. */
+type UsageMetadata = { promptTokenCount: number; candidatesTokenCount: number; totalTokenCount: number };
+
+function usageMetadata(raw: any): UsageMetadata | null {
+  const toInt = (v: unknown) => {
+    const n = typeof v === "number" ? v : Number(v);
+    return Number.isFinite(n) && n >= 0 ? Math.round(n) : 0;
+  };
+  const src = raw?.usageMetadata;
+  if (!src || typeof src !== "object") return null;
+  const out = {
+    promptTokenCount: toInt(src.promptTokenCount),
+    candidatesTokenCount: toInt(src.candidatesTokenCount),
+    totalTokenCount: toInt(src.totalTokenCount),
+  };
+  return (out.promptTokenCount || out.candidatesTokenCount || out.totalTokenCount) ? out : null;
+}
+function somarUsage(total: UsageMetadata | null, add: UsageMetadata | null): UsageMetadata | null {
+  if (!add) return total;
+  if (!total) return { ...add };
+  return {
+    promptTokenCount: total.promptTokenCount + add.promptTokenCount,
+    candidatesTokenCount: total.candidatesTokenCount + add.candidatesTokenCount,
+    totalTokenCount: total.totalTokenCount + add.totalTokenCount,
+  };
+}
+
+/* O CUSTO é uma estimativa GROSSEIRA e é preciso lê-la como tal: os tokens
+   acima são facto, isto é um número redondo para dar ordem de grandeza no
+   Diagnóstico. Não é um preço publicado que eu esteja a afirmar — a
+   pesquisa Google é faturada À PARTE, por pedido, e o preço por token muda
+   com o tempo. Se um dia isto passar de curiosidade a orçamento, calibra
+   estes dois pela fatura real da Google. */
+const CUSTO_ANALISE_EUR = 0.02;   // a pesada: fotos + grounding
+const CUSTO_LEVE_EUR = 0.001;     // a das pontuações: só texto, sem pesquisa
+
+/* ── O modelo da chamada LEVE ──
+   A pesada precisa mesmo do `flash` (ler a fotografia de uma carta não é
+   trabalho para o lite). A leve é só uma lista de nomes a pedir um número
+   de 0 a 5 — e essa corria no mesmo modelo caro sem razão nenhuma. É o
+   flash-lite que a Garrafeira usa como PRIMEIRA escolha em tudo.
+   Se o lite falhar, repete-se no modelo que já respondeu: trocar de modelo
+   não pode ser um caminho novo para ficar sem pontuações nenhumas. */
+const MODELO_LEVE = Deno.env.get("GEMINI_CHEAP_MODEL") || "gemini-flash-lite-latest";
+
 /* As fontes do grounding, sem repetidos. Era código solto dentro do
    `processarAnalise` e passou a função porque agora serve dois sítios: o
    resultado que se mostra e o que se grava no catálogo. */
@@ -588,9 +641,9 @@ async function pedirPontuacoesAprox(
   nomes: string[],
   model: string,
   parentSignal: AbortSignal,
-): Promise<(number | null)[]> {
-  const vazio = () => nomes.map(() => null);
-  if (!nomes.length) return [];
+): Promise<{ notas: (number | null)[]; usage: UsageMetadata | null; modelo: string }> {
+  const vazio = () => ({ notas: nomes.map(() => null), usage: null, modelo: "" });
+  if (!nomes.length) return { notas: [], usage: null, modelo: "" };
   const lista = nomes.map((n, i) => `${i + 1}. ${n}`).join("\n");
   const texto = `Para cada um destes vinhos, dá a tua estimativa geral de
 pontuação (0 a 5, com casas decimais, ex.: 3.8) com base no que já sabes —
@@ -606,8 +659,9 @@ MESMA ordem da lista acima — nada mais, sem texto à volta.`;
   const onAbort = () => ctrl2.abort();
   parentSignal.addEventListener("abort", onAbort);
   const subTimer = setTimeout(() => ctrl2.abort(), 15_000);
-  try {
-    const r = await fetch(`${GAPI}/models/${model}:generateContent?key=${GEMINI_KEY}`, {
+
+  const tentar = async (m: string) => {
+    const r = await fetch(`${GAPI}/models/${m}:generateContent?key=${GEMINI_KEY}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       signal: ctrl2.signal,
@@ -616,16 +670,32 @@ MESMA ordem da lista acima — nada mais, sem texto à volta.`;
         generationConfig: {
           temperature: 0,
           response_mime_type: "application/json",
+          // Sem pesquisa ligada aqui, por isso o thinkingBudget:0 é seguro
+          // (é com o google_search que ele dá 400 — ver as variantes).
           thinkingConfig: { thinkingBudget: 0 },
         },
       }),
     });
-    if (!r.ok) return vazio();
+    if (!r.ok) return null;
     const d = await r.json();
     const txt = (d?.candidates?.[0]?.content?.parts ?? []).map((p: any) => p?.text ?? "").join("");
     const arr = extrairJson(txt);
-    if (!Array.isArray(arr)) return vazio();
-    return nomes.map((_, i) => numOrNull(arr[i], 0, 5));
+    if (!Array.isArray(arr)) return null;
+    return {
+      notas: nomes.map((_, i) => numOrNull(arr[i], 0, 5)),
+      usage: usageMetadata(d),
+      modelo: m,
+    };
+  };
+
+  try {
+    // O barato primeiro; o que já respondeu como rede. Nunca ficar sem
+    // pontuações só por ter mudado de modelo.
+    const leve = await tentar(MODELO_LEVE);
+    if (leve) return leve;
+    if (ctrl2.signal.aborted || MODELO_LEVE === model) return vazio();
+    console.log("SUGERIR-VINHO pontuacoes: lite falhou, repete em", model);
+    return (await tentar(model)) ?? vazio();
   } catch (_) {
     return vazio();
   } finally {
@@ -752,6 +822,10 @@ async function processarAnalise(
   const timer = setTimeout(() => ctrl.abort(), PROC_TIMEOUT_MS);
   let model = "gemini-flash-latest";
   let comPesquisa = true;
+  // O que esta análise gastou, somado ao longo das (até) duas chamadas.
+  let usageTotal: UsageMetadata | null = null;
+  let chamadas = 0;
+  let modeloLeve = "";
 
   try {
     const texto = prompt(pratoLimpo, nImagens, orcamentoNum);
@@ -839,6 +913,8 @@ async function processarAnalise(
     }
 
     const gd = await g.json();
+    usageTotal = somarUsage(usageTotal, usageMetadata(gd));
+    chamadas++;
     const cand = gd?.candidates?.[0];
     const texto2 = (cand?.content?.parts ?? []).map((p: any) => p?.text ?? "").join("").trim();
     const parsed: any = extrairJson(texto2);
@@ -901,12 +977,14 @@ async function processarAnalise(
       // Chamada leve à parte, só texto — nunca falha a análise principal (ver
       // pedirPontuacoesAprox), só fica sem pontuação aproximada se correr mal.
       if (faltam.length && !ctrl.signal.aborted) {
-        const pontuacoes = await pedirPontuacoesAprox(
+        const r2 = await pedirPontuacoesAprox(
           faltam.map((v) => String(v.nome)),
           model,
           ctrl.signal,
         );
-        faltam.forEach((v, i) => { v.pontuacaoAprox = pontuacoes[i] ?? null; });
+        faltam.forEach((v, i) => { v.pontuacaoAprox = r2.notas[i] ?? null; });
+        usageTotal = somarUsage(usageTotal, r2.usage);
+        if (r2.modelo) { modeloLeve = r2.modelo; chamadas++; }
       }
     }
 
@@ -920,6 +998,14 @@ async function processarAnalise(
       // Quantas notas vieram do catálogo (grátis) e quantas foram estimadas
       // pelo modelo: é por aqui que se vê se a partilha está a valer a pena.
       pontuacoes_catalogo: doCatalogo,
+      // O que isto custou: os tokens são facto (vêm da API), o euro é a
+      // estimativa grosseira dos CUSTO_*_EUR lá em cima.
+      ...(usageTotal ? { usageMetadata: usageTotal } : {}),
+      chamadas_gemini: chamadas,
+      ...(modeloLeve ? { modelo_leve: modeloLeve } : {}),
+      custo_estimado_eur: Number(
+        (CUSTO_ANALISE_EUR + (modeloLeve ? CUSTO_LEVE_EUR : 0)).toFixed(4),
+      ),
       coerencia_sem_carta: coerencia.semCarta,
       coerencia_preco_errado: coerencia.precoErrado,
       coerencia_preco_preenchido: coerencia.precoPreenchido,

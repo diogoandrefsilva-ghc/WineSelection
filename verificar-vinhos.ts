@@ -166,6 +166,36 @@ function normResultadoVerif(raw: unknown, nomeEsperado: string): Record<string, 
   };
 }
 
+/* ── O QUE ISTO GASTOU ──
+   Duplicado da `sugerir-vinho.ts` de propósito — cada Edge Function deste
+   projeto é auto-contida (mesma convenção da calendario-sporting). A
+   Garrafeira já contava tokens e esta app não contava nada; sem isto não
+   há como ver quanto é que o catálogo partilhado está a poupar aqui, que é
+   onde a poupança é maior (esta é a chamada mais cara das três). */
+type UsageMetadata = { promptTokenCount: number; candidatesTokenCount: number; totalTokenCount: number };
+
+function usageMetadata(raw: any): UsageMetadata | null {
+  const toInt = (v: unknown) => {
+    const n = typeof v === "number" ? v : Number(v);
+    return Number.isFinite(n) && n >= 0 ? Math.round(n) : 0;
+  };
+  const src = raw?.usageMetadata;
+  if (!src || typeof src !== "object") return null;
+  const out = {
+    promptTokenCount: toInt(src.promptTokenCount),
+    candidatesTokenCount: toInt(src.candidatesTokenCount),
+    totalTokenCount: toInt(src.totalTokenCount),
+  };
+  return (out.promptTokenCount || out.candidatesTokenCount || out.totalTokenCount) ? out : null;
+}
+
+/* Estimativa GROSSEIRA, como na irmã: os tokens são facto, o euro é um
+   número redondo para dar ordem de grandeza. A pesquisa Google é faturada
+   à parte, por pedido — calibra pela fatura real se isto passar de
+   curiosidade a orçamento. Zero quando a resposta veio do catálogo: aí não
+   se falou com o Gemini de todo, e é esse o número que interessa ver. */
+const CUSTO_VERIFICACAO_EUR = 0.01;
+
 /* ── CATÁLOGO PARTILHADO (schema `catalogo`) ──
    Esta função é a mais cara das três (pesquisa Google a sério, pedida à
    mão) e por isso é a que mais ganha em não repetir trabalho: se alguém já
@@ -469,7 +499,10 @@ async function processarVerificacao(
 
     if (!paraIA.length) {
       const verificacao = doCatalogo as Record<string, unknown>[];
-      await registar("ok", { modelo: "catalogo", vinhos: vinhos.length, catalogo: vinhos.length }, quem);
+      await registar("ok", {
+        modelo: "catalogo", vinhos: vinhos.length, catalogo: vinhos.length,
+        gemini: 0, chamadas_gemini: 0, custo_estimado_eur: 0,
+      }, quem);
       await atualizarAnalise(analiseId, quem, { verificacao_estado: "concluido", verificacao });
       return;
     }
@@ -538,6 +571,7 @@ async function processarVerificacao(
     }
 
     const gd = await g.json();
+    const usage = usageMetadata(gd);
     const texto2 = (gd?.candidates?.[0]?.content?.parts ?? []).map((p: any) => p?.text ?? "").join("").trim();
     const parsed: any = extrairJson(texto2);
     const brutos = Array.isArray(parsed?.resultados) ? parsed.resultados : [];
@@ -554,6 +588,9 @@ async function processarVerificacao(
     await registar("ok", {
       modelo: model, vinhos: vinhos.length,
       catalogo: vinhos.length - paraIA.length, gemini: paraIA.length,
+      ...(usage ? { usageMetadata: usage } : {}),
+      chamadas_gemini: 1,
+      custo_estimado_eur: CUSTO_VERIFICACAO_EUR,
     }, quem);
     await atualizarAnalise(analiseId, quem, { verificacao_estado: "concluido", verificacao });
 
