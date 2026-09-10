@@ -92,7 +92,17 @@ async function descobrirFlash(signal: AbortSignal): Promise<string[]> {
   } catch (_) { /* fica o fallback (inclui abort do timeout) */ }
   return _models ?? [];
 }
-const ESTAVEIS = ["gemini-flash-latest", "gemini-2.5-flash", "gemini-2.0-flash"];
+/* SÓ PONTEIROS ("-latest"), nunca nomes de versão fixos. "gemini-2.5-flash"
+   e "gemini-2.0-flash" estavam aqui e são exatamente os que a Google
+   reformou: respondem 404 "no longer available to new users". Ficavam por
+   baixo do ponteiro, que responde primeiro — por isso ninguém dava por
+   isso, até ao dia em que o ponteiro desse 429 e esta escada tivesse dois
+   degraus podres antes da descoberta a salvar. Mesma lição que já custou
+   um deploy de emergência ao `vinho-info` e ao `importar-vinhos` da
+   Garrafeira.
+   O flash-lite fica em último como cabo de vida: para ler a fotografia de
+   uma carta é mais fraco, mas mais fraco é melhor do que nada. */
+const ESTAVEIS = ["gemini-flash-latest", "gemini-flash-lite-latest"];
 async function candidatosModelo(signal: AbortSignal): Promise<string[]> {
   const pinned = Deno.env.get("GEMINI_MODEL");
   const descobertos = await descobrirFlash(signal);
@@ -751,17 +761,33 @@ async function processarAnalise(
        esperada, não por qualidade — com imagens (1 a 6) + grounding, o
        "thinking" por omissão dos modelos 2.5 é um custo de latência grande,
        por isso a 1ª tentativa já vem sempre com thinkingBudget:0. */
+    /* A 1ª variante era `pesquisa + thinkingBudget:0` e foi-se embora: pedir
+       para não pensar AO MESMO TEMPO que se liga o tool `google_search`
+       passou a ser recusado com 400 ("Request contains an invalid
+       argument") pelos modelos que ficaram por trás dos ponteiros
+       "-latest". A pesquisa precisa de pensar para decidir o que
+       pesquisar, e a API deixou de aceitar as duas coisas juntas.
+
+       Não estava PARTIDO — o loop caía na variante seguinte e a análise
+       saía na mesma. Estava a pagar uma ida ao Gemini inútil em todas as
+       análises, e a única maneira de dar por isso era ir ver o sync_log da
+       outra app. Mesma correção que já está no `chamarGemini` do
+       `vinho-info` da Garrafeira. */
     type Variante = { search: boolean; semThinking: boolean; label: string };
     const variantes: Variante[] = [
-      { search: true, semThinking: true, label: "pesquisa+sem-pensar" },
       { search: true, semThinking: false, label: "pesquisa" },
-      { search: false, semThinking: false, label: "sem-pesquisa" },
+      // Sem pesquisa não há conflito nenhum: aqui o thinkingBudget:0 é o
+      // que torna a última hipótese rápida em vez de só barata.
+      { search: false, semThinking: true, label: "sem-pesquisa" },
     ];
     const chamarGemini = (m: string, v: Variante) => {
       const generationConfig: Record<string, unknown> = v.search
         ? { temperature: 0 }
         : { temperature: 0, response_mime_type: "application/json" };
-      if (v.semThinking) generationConfig.thinkingConfig = { thinkingBudget: 0 };
+      // `&& !v.search` é a trave, não um detalhe: as duas coisas juntas dão
+      // 400 (ver a nota nas variantes). Fica aqui para que uma variante
+      // nova mal combinada não volte a reabrir o mesmo buraco.
+      if (v.semThinking && !v.search) generationConfig.thinkingConfig = { thinkingBudget: 0 };
       const corpo: Record<string, unknown> = { contents: [{ role: "user", parts }], generationConfig };
       if (v.search) corpo.tools = [{ google_search: {} }];
       return fetch(`${GAPI}/models/${m}:generateContent?key=${GEMINI_KEY}`, {

@@ -72,7 +72,17 @@ async function descobrirFlash(signal: AbortSignal): Promise<string[]> {
   } catch (_) { /* fica o fallback (inclui abort do timeout) */ }
   return _models ?? [];
 }
-const ESTAVEIS = ["gemini-flash-latest", "gemini-2.5-flash", "gemini-2.0-flash"];
+/* SÓ PONTEIROS ("-latest"), nunca nomes de versão fixos. "gemini-2.5-flash"
+   e "gemini-2.0-flash" estavam aqui e são exatamente os que a Google
+   reformou: respondem 404 "no longer available to new users". Ficavam por
+   baixo do ponteiro, que responde primeiro — por isso ninguém dava por
+   isso, até ao dia em que o ponteiro desse 429 e esta escada tivesse dois
+   degraus podres antes da descoberta a salvar. Mesma lição que já custou
+   um deploy de emergência ao `vinho-info` e ao `importar-vinhos` da
+   Garrafeira.
+   O flash-lite fica em último como cabo de vida: para ler a fotografia de
+   uma carta é mais fraco, mas mais fraco é melhor do que nada. */
+const ESTAVEIS = ["gemini-flash-latest", "gemini-flash-lite-latest"];
 async function candidatosModelo(signal: AbortSignal): Promise<string[]> {
   const pinned = Deno.env.get("GEMINI_MODEL");
   const descobertos = await descobrirFlash(signal);
@@ -467,13 +477,20 @@ async function processarVerificacao(
     const texto = promptVerificacao(paraIA);
     const parts = [{ text: texto }];
 
+    /* Aqui o `google_search` está SEMPRE ligado (é a razão de esta função
+       existir — ver o cabeçalho), por isso a variante "sem-pensar" era um
+       400 garantido: pedir thinkingBudget:0 com o tool de pesquisa passou
+       a ser recusado ("Request contains an invalid argument"). Gastava-se
+       uma ida ao Gemini a cada verificação para depois cair nesta, que é a
+       única que a API aceita. Sobra uma só, e é a certa. */
     type Variante = { semThinking: boolean; label: string };
     const variantes: Variante[] = [
-      { semThinking: true, label: "sem-pensar" },
-      { semThinking: false, label: "normal" },
+      { semThinking: false, label: "pesquisa" },
     ];
     const chamarGemini = (m: string, v: Variante) => {
       const generationConfig: Record<string, unknown> = { temperature: 0 };
+      // Nunca com pesquisa ligada — e aqui ela está sempre. A trave fica
+      // para o caso de um dia alguém acrescentar uma variante sem tool.
       if (v.semThinking) generationConfig.thinkingConfig = { thinkingBudget: 0 };
       return fetch(`${GAPI}/models/${m}:generateContent?key=${GEMINI_KEY}`, {
         method: "POST",
