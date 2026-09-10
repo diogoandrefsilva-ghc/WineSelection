@@ -21,11 +21,46 @@ depois se cola no SQL Editor do Supabase.
    de gerar uma password temporária sem depender de email (ver "Recuperação
    de password" abaixo). Idempotente, tolerante.
 
+## O schema `catalogo` (partilhado com a Garrafeira)
+
+Não vive neste repo, e é de propósito. É a memória comum das duas apps de
+vinhos: o que a IA já procurou (aqui ou lá) e o que alguém já confirmou por
+ter a garrafa em casa. Antes de pagar uma pesquisa, as Edge Functions desta
+app perguntam-lhe — é isso que faz a `pontuacaoAprox` de metade de uma carta
+deixar de ser um palpite do modelo e passar a ser uma nota pesquisada, e a
+`verificar-vinhos` responder por vezes sem falar com o Gemini de todo.
+
+**A fonte de verdade é o repo Garrafeira: `db/catalogo-partilhado.sql`.**
+Não há cópia aqui, e não deve haver: um schema escrito em dois sítios é um
+que um dia diverge sem ninguém dar por isso, e as duas apps deixam de se
+encontrar na mesma linha em silêncio. Correr uma vez, no mesmo projeto
+Supabase, com os passos que o `db/README.md` de lá descreve (migração 12).
+
+O que esta app ESCREVE lá: só factos sobre o VINHO — o tipo, a região, as
+castas, a nota do Vivino com fonte, e a faixa de preço de mercado. O que
+NUNCA escreve:
+
+- a **`pontuacaoAprox`**, a estimativa de memória do modelo. Esta app
+  inteira está construída à volta de não a disfarçar de verificação;
+  espalhá-la pelas duas apps com ar de facto pesquisado seria fazer pior do
+  que isso. A `catalogo.forca()` do lado do SQL recusa-a mesmo que alguém
+  um dia tente;
+- o **"barato/justo/caro"**. Esse não é do vinho, é de uma CARTA: o mesmo
+  Papa Figos é barato a 22 € e caro a 45 €. O que atravessa é o preço de
+  MERCADO, e a comparação com a carta que está à frente refaz-se sempre em
+  código (`avaliarPreco` em `verificar-vinhos.ts`) — o que é mais honesto
+  do que a opinião do modelo, porque é uma conta que se mostra e que quem
+  está à mesa pode refazer.
+
 ## Passos manuais (fora do SQL Editor)
 
-1. **Expor o schema `wineselection` na API**: Project Settings → API →
+1. **Expor os schemas na API**: Project Settings → API →
    Data API → "Exposed schemas" → acrescentar `wineselection` ao lado de
    `festasbv`/`goals`/etc. Sem isto o PostgREST devolve 404 a tudo.
+   Acrescentar **também `catalogo`** — é por aí que as Edge Functions falam
+   com o catálogo partilhado. Sem ele exposto o catálogo nunca responde, e
+   como não pode deitar uma análise abaixo, o que se nota não é um erro: é
+   a conta do Gemini a não descer.
 2. **Redirect URL**: Authentication → URL Configuration → Redirect URLs →
    acrescentar o URL onde a app fica servida (ex.
    `https://diogoandrefsilva-ghc.github.io/WineSelection/`). Sem isto o

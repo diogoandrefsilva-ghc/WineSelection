@@ -156,6 +156,155 @@ function normResultadoVerif(raw: unknown, nomeEsperado: string): Record<string, 
   };
 }
 
+/* ── CATÁLOGO PARTILHADO (schema `catalogo`) ──
+   Esta função é a mais cara das três (pesquisa Google a sério, pedida à
+   mão) e por isso é a que mais ganha em não repetir trabalho: se alguém já
+   verificou este vinho — aqui ou na Garrafeira — a resposta já existe.
+
+   O QUE VEM DO CATÁLOGO E O QUE NÃO PODE VIR. A pontuação é do VINHO e
+   viaja bem. A classificação do preço ("barato/justo/caro") NÃO é do
+   vinho: é um juízo sobre A CARTA que está à frente, e o mesmo Papa Figos
+   é barato a 22 € e caro a 45 €. Por isso o catálogo guarda o preço de
+   MERCADO e a comparação com esta carta refaz-se sempre, aqui em código
+   (`avaliarPreco`) — o que é, aliás, mais honesto do que a opinião do
+   modelo: é uma conta que se mostra e que qualquer pessoa refaz à mesa.
+
+   A trave: só se responde do catálogo quando lá estão AS DUAS COISAS (a
+   nota pesquisada e o preço de mercado). Meia resposta seria pior do que
+   pesquisar — quem escolheu estes cinco vinhos à mão escolheu-os porque
+   quer saber, e "não sei o preço" não é o que veio buscar. */
+const CATALOGO_IDADE_DIAS = 30;
+
+type Conhecido = {
+  nome: string; ano: number | null; ficha: Record<string, unknown>;
+  fontes: { titulo: string; url: string }[]; atualizadoEm: string;
+};
+
+async function catalogoRpc(fn: string, corpo: Record<string, unknown>, signal?: AbortSignal): Promise<any> {
+  const r = await fetch(`${SB_URL}/rest/v1/rpc/${fn}`, {
+    method: "POST",
+    headers: {
+      apikey: SB_SRV, Authorization: "Bearer " + SB_SRV,
+      "Content-Type": "application/json",
+      "Content-Profile": "catalogo", "Accept-Profile": "catalogo",
+    },
+    body: JSON.stringify(corpo),
+    ...(signal ? { signal } : {}),
+  });
+  if (!r.ok) throw new Error(`catalogo ${fn} ${r.status}`);
+  return await r.json();
+}
+
+async function catalogoProcurarLote(
+  pedidos: { nome: string; ano: number | null }[], signal?: AbortSignal,
+): Promise<(Conhecido | null)[]> {
+  if (!pedidos.length) return [];
+  try {
+    const d = await catalogoRpc("procurar_lote", {
+      p_pedidos: pedidos.map((p) => ({ nome: p.nome, produtor: "", ano: p.ano })),
+      p_idade_dias: CATALOGO_IDADE_DIAS,
+    }, signal);
+    if (!Array.isArray(d)) return pedidos.map(() => null);
+    return pedidos.map((_, i) => {
+      const x = d[i];
+      if (!x || typeof x !== "object" || !x.ficha) return null;
+      return {
+        nome: String(x.nome || ""),
+        ano: typeof x.ano === "number" ? x.ano : null,
+        ficha: (x.ficha && typeof x.ficha === "object") ? x.ficha : {},
+        fontes: Array.isArray(x.fontes) ? x.fontes.slice(0, 8) : [],
+        atualizadoEm: String(x.atualizadoEm || ""),
+      };
+    });
+  } catch (_) { return pedidos.map(() => null); }
+}
+
+async function catalogoJuntar(
+  nome: string, ano: number | null, ficha: Record<string, unknown>, signal?: AbortSignal,
+) {
+  try {
+    if (!nome || !Object.keys(ficha).length) return;
+    await catalogoRpc("juntar", {
+      p_nome: nome, p_produtor: "", p_ano: ano,
+      p_ficha: ficha, p_origem: "ws-verificacao", p_fontes: [],
+    }, signal);
+  } catch (_) { /* o catálogo nunca falha uma verificação */ }
+}
+
+function anoDoNome(nome: string): number | null {
+  const m = String(nome || "").match(/\b(19|20)\d{2}\b/);
+  if (!m) return null;
+  const n = parseInt(m[0], 10);
+  return n >= 1900 && n <= new Date().getFullYear() + 2 ? n : null;
+}
+
+/* "18-25 €" -> 21.5, para o catálogo. Um texto sem número nenhum não
+   escreve nada: inventar um preço num catálogo partilhado era o pior que
+   daqui podia sair. */
+function precoMedioDeFaixa(txt: unknown): number | null {
+  const nums = String(txt ?? "").replace(",", ".").match(/\d+(?:\.\d+)?/g);
+  if (!nums || !nums.length) return null;
+  const vals = nums.map(Number).filter((n) => isFinite(n) && n > 0 && n < 100000);
+  if (!vals.length) return null;
+  return Math.round(((Math.min(...vals) + Math.max(...vals)) / 2) * 100) / 100;
+}
+
+/* A conta que substitui a opinião do modelo quando o preço de mercado já é
+   conhecido. Os cortes não são ciência — são o que se diz em qualquer
+   restaurante sobre a margem da garrafa: 2 a 3 vezes o preço de loja é o
+   normal, abaixo disso é um achado, muito acima é abuso. Ficam escritos
+   aqui e ficam escritos no COMENTÁRIO que vai para o ecrã: quem está à
+   mesa vê a conta e discorda dela se quiser, que é mais do que alguma vez
+   pôde fazer com um "caro" dito pelo modelo. */
+function avaliarPreco(precoCarta: number | null, precoMercado: number): Record<string, unknown> {
+  const faixa = `~${precoMercado.toFixed(precoMercado < 20 ? 2 : 0).replace(".", ",")} € em loja`;
+  if (precoCarta == null || precoCarta <= 0) {
+    return {
+      classificacao: "desconhecido", faixaMercado: faixa,
+      comentario: "Não li o preço deste vinho na carta, por isso não dá para dizer se está bem de preço.",
+    };
+  }
+  const r = precoCarta / precoMercado;
+  const classificacao = r <= 2 ? "barato" : r <= 3 ? "justo" : r <= 4.5 ? "caro" : "muito_caro";
+  const rTxt = r.toFixed(1).replace(".", ",");
+  const extra = classificacao === "barato"
+    ? "abaixo do que é habitual num restaurante (2 a 3 vezes o preço de loja)."
+    : classificacao === "justo"
+    ? "dentro do habitual num restaurante (2 a 3 vezes o preço de loja)."
+    : classificacao === "caro"
+    ? "acima do habitual num restaurante (2 a 3 vezes o preço de loja)."
+    : "muito acima do habitual num restaurante (2 a 3 vezes o preço de loja).";
+  return {
+    classificacao, faixaMercado: faixa,
+    comentario: `Custa cerca de ${precoMercado.toFixed(precoMercado < 20 ? 2 : 0).replace(".", ",")} € numa loja e ${precoCarta.toFixed(2).replace(".", ",")} € nesta carta — ${rTxt}×, ${extra}`,
+  };
+}
+
+/* A resposta que o catálogo consegue dar a um vinho, ou null se não
+   conseguir dar a resposta INTEIRA (ver a trave, no topo deste bloco). */
+function verificacaoDoCatalogo(
+  c: Conhecido | null, nome: string, precoCarta: number | null,
+): Record<string, unknown> | null {
+  if (!c) return null;
+  const nota = numOrNull((c.ficha as any).vivino_nota, 0, 5);
+  const mercado = numOrNull((c.ficha as any).preco_medio, 0.5, 100000);
+  if (nota == null || mercado == null) return null;
+  const url = (c.ficha as any).vivino_url;
+  return {
+    nome,
+    pontuacao: [{
+      fonte: "Vivino", valor: nota, escala: 5,
+      url: (typeof url === "string" && /^https?:\/\//i.test(url)) ? url.slice(0, 300) : null,
+    }],
+    precoAvaliacao: avaliarPreco(precoCarta, mercado),
+    // A app diz isto a quem pediu: uma verificação instantânea merece
+    // explicar-se, senão parece que ninguém foi pesquisar nada.
+    origem: "catalogo",
+    origemEm: c.atualizadoEm,
+    origemAno: c.ano,
+  };
+}
+
 type VinhoPedido = { nome: string; regiao: string | null; preco: number | null };
 
 const promptVerificacao = (vinhos: VinhoPedido[]) => {
@@ -291,7 +440,31 @@ async function processarVerificacao(
   let model = "gemini-flash-latest";
 
   try {
-    const texto = promptVerificacao(vinhos);
+    /* ── Primeiro o que já se sabe ──
+       Cada um destes vinhos é uma pesquisa Google paga. Os que já estão no
+       catálogo partilhado com a ficha COMPLETA (nota pesquisada + preço de
+       mercado) respondem já; ao Gemini vão só os que sobram. Quando não
+       sobra nenhum, esta função não chega a falar com o Gemini — e continua
+       a ser verificação a sério, porque o que está no catálogo foi lá posto
+       por uma pesquisa a sério (a `catalogo.forca` não deixa entrar
+       estimativas de memória). */
+    const conhecidos = await catalogoProcurarLote(
+      vinhos.map((v) => ({ nome: v.nome, ano: anoDoNome(v.nome) })),
+      ctrl.signal,
+    );
+    const doCatalogo: (Record<string, unknown> | null)[] = vinhos.map((v, i) =>
+      verificacaoDoCatalogo(conhecidos[i], v.nome, v.preco)
+    );
+    const paraIA = vinhos.filter((_, i) => !doCatalogo[i]);
+
+    if (!paraIA.length) {
+      const verificacao = doCatalogo as Record<string, unknown>[];
+      await registar("ok", { modelo: "catalogo", vinhos: vinhos.length, catalogo: vinhos.length }, quem);
+      await atualizarAnalise(analiseId, quem, { verificacao_estado: "concluido", verificacao });
+      return;
+    }
+
+    const texto = promptVerificacao(paraIA);
     const parts = [{ text: texto }];
 
     type Variante = { semThinking: boolean; label: string };
@@ -351,11 +524,44 @@ async function processarVerificacao(
     const texto2 = (gd?.candidates?.[0]?.content?.parts ?? []).map((p: any) => p?.text ?? "").join("").trim();
     const parsed: any = extrairJson(texto2);
     const brutos = Array.isArray(parsed?.resultados) ? parsed.resultados : [];
-    const verificacao = vinhos.map((v, i) => normResultadoVerif(brutos[i], v.nome));
+    const daIA = paraIA.map((v, i) => normResultadoVerif(brutos[i], v.nome));
 
-    console.log("VERIFICAR-VINHOS ok:", verificacao.length, "modelo:", model);
-    await registar("ok", { modelo: model, vinhos: vinhos.length }, quem);
+    // Volta a juntar os dois lados pela ORDEM ORIGINAL: quem escolheu cinco
+    // vinhos na lista espera-os de volta na ordem em que os escolheu, e não
+    // primeiro os que por acaso já se sabiam.
+    let ia = 0;
+    const verificacao = vinhos.map((_, i) => doCatalogo[i] ?? daIA[ia++]);
+
+    console.log("VERIFICAR-VINHOS ok:", verificacao.length, "modelo:", model,
+                "catalogo:", vinhos.length - paraIA.length);
+    await registar("ok", {
+      modelo: model, vinhos: vinhos.length,
+      catalogo: vinhos.length - paraIA.length, gemini: paraIA.length,
+    }, quem);
     await atualizarAnalise(analiseId, quem, { verificacao_estado: "concluido", verificacao });
+
+    /* E o que se acabou de pesquisar vai para o catálogo — é uma pesquisa
+       Google a sério, a mais forte que aqui se produz (ver `catalogo.forca`),
+       e é o que faz a Garrafeira não voltar a pagar por este mesmo vinho.
+       Depois de a verificação estar fechada: quem está à espera não espera
+       por isto. */
+    for (let i = 0; i < paraIA.length; i++) {
+      const r = daIA[i] as any;
+      const nota = numOrNull(r?.pontuacao?.[0]?.valor, 0, 5);
+      const escala = Number(r?.pontuacao?.[0]?.escala);
+      const ficha: Record<string, unknown> = {};
+      // Só a do Vivino e só na escala de 5 — uma nota de 92/100 não é a
+      // mesma coisa e não se converte dividindo por 20.
+      if (nota != null && escala === 5 && /vivino/i.test(String(r?.pontuacao?.[0]?.fonte || ""))) {
+        ficha.vivino_nota = nota;
+        const u = r?.pontuacao?.[0]?.url;
+        if (typeof u === "string" && /vivino\.com/i.test(u)) ficha.vivino_url = u.slice(0, 300);
+      }
+      const pm = precoMedioDeFaixa(r?.precoAvaliacao?.faixaMercado);
+      if (pm != null) ficha.preco_medio = pm;
+      if (paraIA[i].regiao) ficha.regiao = s(paraIA[i].regiao, 60);
+      await catalogoJuntar(paraIA[i].nome, anoDoNome(paraIA[i].nome), ficha, ctrl.signal);
+    }
   } catch (e) {
     const err = e as Error;
     const timeout = err.name === "AbortError";

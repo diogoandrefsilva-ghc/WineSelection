@@ -256,8 +256,191 @@ function normVinhoCarta(raw: unknown): Record<string, unknown> | null {
     tipo: TIPOS.includes(o.tipo) ? o.tipo : null,
     regiao: o.regiao ? s(o.regiao, 60) : null,
     preco: numOrNull(o.preco, 0, 5000),
-    pontuacaoAprox: null as number | null, // preenchido depois por pedirPontuacoesAprox()
+    pontuacaoAprox: null as number | null,      // do catálogo, ou por pedirPontuacoesAprox()
+    // De onde veio a nota acima: 'catalogo' é uma pesquisa a sério que
+    // alguém já pagou (aqui ou na Garrafeira); 'estimativa' é o palpite de
+    // memória do modelo. Continuam a ser coisas diferentes na mesma lista,
+    // e a app tem de as poder separar.
+    pontuacaoOrigem: null as string | null,
+    pontuacaoAno: null as number | null,        // a colheita a que a nota pertence
+    pontuacaoUrl: null as string | null,
   };
+}
+
+/* As fontes do grounding, sem repetidos. Era código solto dentro do
+   `processarAnalise` e passou a função porque agora serve dois sítios: o
+   resultado que se mostra e o que se grava no catálogo. */
+function fontesParaCatalogo(cand: any): { titulo: string; url: string }[] {
+  const out: { titulo: string; url: string }[] = [];
+  (cand?.groundingMetadata?.groundingChunks ?? []).forEach((c: any) => {
+    const w = c?.web;
+    if (w?.uri && !out.some((f) => f.url === w.uri)) {
+      out.push({ titulo: String(w.title ?? w.uri).slice(0, 80), url: String(w.uri) });
+    }
+  });
+  return out;
+}
+
+/* ── CATÁLOGO PARTILHADO (schema `catalogo`) ──
+   A memória comum desta app e da Garrafeira, no mesmo projeto Supabase.
+   Serve duas perguntas que aqui se pagam caro:
+   · a pontuação de um vinho da carta — que hoje sai de uma SEGUNDA chamada
+     ao Gemini, de memória e sem pesquisa nenhuma (`pedirPontuacoesAprox`).
+     Se alguém já pesquisou este vinho a sério — aqui ou na Garrafeira — a
+     nota do catálogo é melhor do que essa estimativa E é de graça;
+   · o preço de mercado, que é o que sustenta o "barato/justo/caro".
+
+   Três regras que não são detalhe:
+   · a CHAVE (o que faz dois vinhos serem o mesmo vinho) vive só no SQL:
+     daqui vai o nome e o ano em cru. Ver a nota em `catalogo.chave()`;
+   · a `pontuacaoAprox` NUNCA é escrita no catálogo. É uma estimativa de
+     memória, e esta app inteira está construída à volta de não a disfarçar
+     de verificação — espalhá-la pelas duas apps com ar de facto pesquisado
+     era fazer pior do que isso. Só `sugestoes[].pontuacao` (que vem com
+     pesquisa Google e fonte) e a `verificar-vinhos` é que escrevem;
+   · nada disto pode deitar uma análise abaixo. É uma poupança, não uma
+     dependência: se o RPC falhar, segue-se como sempre. */
+const CATALOGO_IDADE_DIAS = 30;
+// A Garrafeira tem seis cores e esta app tem sete rótulos que não são todos
+// cores ("Verde" é estilo, "Doce" é doçura, "Outro" não é nada). Só estes
+// quatro querem dizer o mesmo nas duas — o resto não se escreve, que um
+// vocabulário mal traduzido enche os filtros da outra app de sinónimos.
+const TIPOS_PARTILHADOS = ["Tinto", "Branco", "Rosé", "Espumante"];
+
+type Conhecido = {
+  nome: string; produtor: string; ano: number | null;
+  ficha: Record<string, unknown>; fontes: { titulo: string; url: string }[];
+  exato: boolean; mesmoAno: boolean | null; atualizadoEm: string;
+};
+
+async function catalogoRpc(fn: string, corpo: Record<string, unknown>, signal?: AbortSignal): Promise<any> {
+  const r = await fetch(`${SB_URL}/rest/v1/rpc/${fn}`, {
+    method: "POST",
+    headers: {
+      apikey: SB_SRV, Authorization: "Bearer " + SB_SRV,
+      "Content-Type": "application/json",
+      "Content-Profile": "catalogo", "Accept-Profile": "catalogo",
+    },
+    body: JSON.stringify(corpo),
+    ...(signal ? { signal } : {}),
+  });
+  if (!r.ok) throw new Error(`catalogo ${fn} ${r.status}`);
+  return await r.json();
+}
+
+function normConhecido(d: any): Conhecido | null {
+  if (!d || typeof d !== "object" || !d.ficha) return null;
+  return {
+    nome: String(d.nome || ""), produtor: String(d.produtor || ""),
+    ano: typeof d.ano === "number" ? d.ano : null,
+    ficha: (d.ficha && typeof d.ficha === "object") ? d.ficha : {},
+    fontes: Array.isArray(d.fontes) ? d.fontes.slice(0, 8) : [],
+    exato: d.exato === true,
+    mesmoAno: (d.mesmoAno === null || d.mesmoAno === undefined) ? null : d.mesmoAno === true,
+    atualizadoEm: String(d.atualizadoEm || ""),
+  };
+}
+
+/* Uma carta inteira de uma vez. Quarenta idas ao PostgREST era trocar uma
+   chamada cara ao Gemini por quarenta baratas — e essa troca faz-se uma vez
+   só, aqui. A ordem da resposta é a do pedido, com `null` onde não se sabe. */
+async function catalogoProcurarLote(
+  pedidos: { nome: string; ano: number | null }[], signal?: AbortSignal,
+): Promise<(Conhecido | null)[]> {
+  if (!pedidos.length) return [];
+  try {
+    const d = await catalogoRpc("procurar_lote", {
+      p_pedidos: pedidos.map((p) => ({ nome: p.nome, produtor: "", ano: p.ano })),
+      p_idade_dias: CATALOGO_IDADE_DIAS,
+    }, signal);
+    if (!Array.isArray(d)) return pedidos.map(() => null);
+    return pedidos.map((_, i) => normConhecido(d[i]));
+  } catch (_) { return pedidos.map(() => null); }
+}
+
+async function catalogoJuntar(
+  nome: string, ano: number | null, ficha: Record<string, unknown>,
+  origem: string, fontes: { titulo: string; url: string }[], signal?: AbortSignal,
+) {
+  try {
+    if (!nome || !Object.keys(ficha).length) return;
+    await catalogoRpc("juntar", {
+      p_nome: nome, p_produtor: "", p_ano: ano,
+      p_ficha: ficha, p_origem: origem, p_fontes: (fontes || []).slice(0, 8),
+    }, signal);
+  } catch (_) { /* o catálogo nunca falha uma análise */ }
+}
+
+/* A colheita, quando a carta a escreve ("Papa Figos 2020"). Vale a pena
+   tirá-la: com ano, o catálogo responde com a nota DAQUELA colheita; sem
+   ele, responde com a de uma recente e diz qual (ver `catalogo.procurar`). */
+function anoDoNome(nome: string): number | null {
+  const m = String(nome || "").match(/\b(19|20)\d{2}\b/);
+  if (!m) return null;
+  const n = parseInt(m[0], 10);
+  return n >= 1900 && n <= new Date().getFullYear() + 2 ? n : null;
+}
+
+/* A nota do Vivino que o catálogo tem, se tiver. Só a do Vivino e só na
+   escala de 5: uma nota de 92/100 de um crítico não é a mesma coisa e não
+   se converte — dividir por 20 dava um número que ninguém publicou. */
+function notaDoCatalogo(c: Conhecido | null): { valor: number; url: string | null; ano: number | null } | null {
+  if (!c) return null;
+  const v = numOrNull((c.ficha as any).vivino_nota, 0, 5);
+  if (v == null) return null;
+  const u = (c.ficha as any).vivino_url;
+  return { valor: v, url: (typeof u === "string" && /^https?:\/\//i.test(u)) ? u.slice(0, 300) : null, ano: c.ano };
+}
+
+/* "18-25 €" -> 21.5. O ponto médio de uma faixa é o melhor número que dali
+   se tira, e é o que a Garrafeira guarda como `preco_medio`. Um texto de
+   que não saia número nenhum não escreve nada — inventar um preço era o
+   pior que se podia deixar entrar num catálogo partilhado. */
+function precoMedioDeFaixa(txt: unknown): number | null {
+  const nums = String(txt ?? "").replace(",", ".").match(/\d+(?:\.\d+)?/g);
+  if (!nums || !nums.length) return null;
+  const vals = nums.map(Number).filter((n) => isFinite(n) && n > 0 && n < 100000);
+  if (!vals.length) return null;
+  const m = (Math.min(...vals) + Math.max(...vals)) / 2;
+  return Math.round(m * 100) / 100;
+}
+
+/* Castas: o campo `casta` desta app é texto livre e às vezes traz a lista
+   toda ("Touriga Nacional, Tinta Roriz"). Parte-se, e deitam-se fora as
+   palavras que dizem a CONTAGEM das castas em vez de uma casta — mesma
+   limpeza que a `vinho-info` da Garrafeira faz ao ler o Gemini, senão
+   nascia uma casta fantasma chamada "Blend" ao lado das verdadeiras. */
+function castasDoTexto(txt: unknown): string[] {
+  return [...new Set(String(txt ?? "").split(/[,;/]|\se\s/i)
+    .map((x) => x.replace(/\s*\(\d+%?\)\s*/g, " ").replace(/\s+/g, " ").trim())
+    .filter((x) => x.length > 2 && x.length <= 50)
+    .filter((x) => !/^(blend|lote|v[aá]rias|diversas|field blend|castas?|misto|assemblage)$/i.test(x)))]
+    .slice(0, 12);
+}
+
+/* O que de uma sugestão é FACTO SOBRE O VINHO, e por isso pode ser
+   partilhado. Fica de fora tudo o que é sobre esta mesa: a `combinacao`
+   (é sobre o prato que se pediu hoje), o `precoCarta` (é o preço deste
+   restaurante) e a classificação "barato/justo/caro" — essa é um juízo
+   sobre uma carta, não sobre o vinho, e o mesmo vinho é barato numa e caro
+   noutra. Do preço só passa a FAIXA DE MERCADO, que é do vinho. */
+function fichaDaSugestao(sug: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (TIPOS_PARTILHADOS.includes(String(sug.tipo))) out.tipo = sug.tipo;
+  if (sug.regiao) out.regiao = s(sug.regiao, 60);
+  const castas = castasDoTexto(sug.casta);
+  if (castas.length) out.castas = castas;
+
+  const pts = Array.isArray(sug.pontuacao) ? sug.pontuacao as any[] : [];
+  const viv = pts.find((p) => /vivino/i.test(String(p?.fonte || "")) && Number(p?.escala) === 5);
+  if (viv) {
+    const n = numOrNull(viv.valor, 0, 5);
+    if (n != null) out.vivino_nota = n;
+    if (typeof viv.url === "string" && /vivino\.com/i.test(viv.url)) out.vivino_url = viv.url.slice(0, 300);
+  }
+  const pm = precoMedioDeFaixa((sug.precoAvaliacao as any)?.faixaMercado);
+  if (pm != null) out.preco_medio = pm;
+  return out;
 }
 
 /* ── Coerência entre a sugestão e a carta que o modelo leu ──
@@ -653,30 +836,64 @@ async function processarAnalise(
     // mais nenhuma chamada ao modelo (ver verificarCoerencia).
     const coerencia = verificarCoerencia(sugestoes, vinhosCarta);
 
-    // Chamada leve à parte, só texto — nunca falha a análise principal (ver
-    // pedirPontuacoesAprox), só fica sem pontuação aproximada se correr mal.
+    /* ── As pontuações da lista: primeiro o que já se sabe, e só depois a IA
+       Era sempre uma segunda chamada ao Gemini, a estimar ~40 vinhos de
+       memória. Agora pergunta-se antes ao catálogo partilhado: um vinho que
+       alguém já pesquisou a sério (aqui ou na Garrafeira), ou que alguém
+       tem em casa com a ficha feita, responde já — e responde MELHOR, que
+       uma nota pesquisada vale mais do que uma estimativa. A chamada ao
+       Gemini fica só para os que sobram, e quando não sobra nenhum não há
+       chamada nenhuma.
+
+       `pontuacaoOrigem` é o que impede isto de virar uma mentira cómoda:
+       a app tem de poder dizer quais são pesquisadas e quais são palpite,
+       porque continuam a ser coisas diferentes na mesma lista. */
+    let doCatalogo = 0;
     if (vinhosCarta.length && !ctrl.signal.aborted) {
-      const pontuacoes = await pedirPontuacoesAprox(
-        vinhosCarta.map((v) => String(v.nome)),
-        model,
+      const conhecidos = await catalogoProcurarLote(
+        vinhosCarta.map((v) => ({ nome: String(v.nome), ano: anoDoNome(String(v.nome)) })),
         ctrl.signal,
       );
-      vinhosCarta.forEach((v, i) => { v.pontuacaoAprox = pontuacoes[i] ?? null; });
+      vinhosCarta.forEach((v, i) => {
+        const n = notaDoCatalogo(conhecidos[i]);
+        if (n) {
+          v.pontuacaoAprox = n.valor;
+          v.pontuacaoOrigem = "catalogo";
+          // De que colheita é a nota: a carta muitas vezes não diz o ano, e
+          // quem está à mesa merece saber a que garrafa é que ela pertence.
+          v.pontuacaoAno = n.ano;
+          v.pontuacaoUrl = n.url;
+          doCatalogo++;
+        } else {
+          v.pontuacaoOrigem = "estimativa";
+          v.pontuacaoAno = null;
+          v.pontuacaoUrl = null;
+        }
+      });
+
+      const faltam = vinhosCarta.filter((v) => v.pontuacaoOrigem === "estimativa");
+      // Chamada leve à parte, só texto — nunca falha a análise principal (ver
+      // pedirPontuacoesAprox), só fica sem pontuação aproximada se correr mal.
+      if (faltam.length && !ctrl.signal.aborted) {
+        const pontuacoes = await pedirPontuacoesAprox(
+          faltam.map((v) => String(v.nome)),
+          model,
+          ctrl.signal,
+        );
+        faltam.forEach((v, i) => { v.pontuacaoAprox = pontuacoes[i] ?? null; });
+      }
     }
 
-    const fontes: { titulo: string; url: string }[] = [];
-    (cand?.groundingMetadata?.groundingChunks ?? []).forEach((c: any) => {
-      const w = c?.web;
-      if (w?.uri && !fontes.some((f) => f.url === w.uri)) {
-        fontes.push({ titulo: String(w.title ?? w.uri).slice(0, 80), url: String(w.uri) });
-      }
-    });
+    const fontes = fontesParaCatalogo(cand);
 
     console.log("SUGERIR-VINHO sugestoes:", sugestoes.length, "vinhosCarta:", vinhosCarta.length, "pesquisa:", comPesquisa);
     await registar("ok", {
       sugestoes: sugestoes.length, vinhos_carta: vinhosCarta.length, modelo: model,
       pesquisa: comPesquisa, prato: pratoLimpo, fotos: nImagens, orcamento: orcamentoNum,
       pontuacoes_aprox: vinhosCarta.filter((v) => v.pontuacaoAprox != null).length,
+      // Quantas notas vieram do catálogo (grátis) e quantas foram estimadas
+      // pelo modelo: é por aqui que se vê se a partilha está a valer a pena.
+      pontuacoes_catalogo: doCatalogo,
       coerencia_sem_carta: coerencia.semCarta,
       coerencia_preco_errado: coerencia.precoErrado,
       coerencia_preco_preenchido: coerencia.precoPreenchido,
@@ -695,6 +912,25 @@ async function processarAnalise(
       geradoEm: new Date().toISOString(),
     };
     await atualizarAnalise(analiseId, quem, { estado: "concluido", resultado });
+
+    /* Só DEPOIS de a análise estar fechada: o que esta pesquisa descobriu
+       vai para o catálogo partilhado, e é isso que faz a próxima pergunta —
+       nesta app ou na Garrafeira — não a voltar a pagar. Fica para o fim de
+       propósito: quem está à espera do resultado não tem de esperar por
+       isto, e se falhar não estraga nada que já esteja feito.
+
+       Só as SUGESTÕES, que são as únicas que vêm com pesquisa e fonte. A
+       lista da carta não entra — ver a regra no bloco do catálogo. */
+    if (comPesquisa) {
+      for (const sug of sugestoes) {
+        const ficha = fichaDaSugestao(sug);
+        if (!Object.keys(ficha).length) continue;
+        await catalogoJuntar(
+          String(sug.nome), anoDoNome(String(sug.nome)), ficha,
+          "ws-sugestao", fontes, ctrl.signal,
+        );
+      }
+    }
   } catch (e) {
     const err = e as Error;
     const timeout = err.name === "AbortError";
