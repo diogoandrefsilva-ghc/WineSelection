@@ -259,6 +259,20 @@ pesquisado, e depois já ninguém sabia de onde tinha vindo. A
 mandá-la. Só `sugestoes[].pontuacao` (que vem com pesquisa e fonte) e a
 `verificar-vinhos` é que escrevem.
 
+**E uma nota escrita à mão numa garrafeira também não vale o que vale a
+`verificar-vinhos`.** A Garrafeira deixa cada um escrever o que quiser nos
+campos do seu vinho, e o trigger dela leva isso para o catálogo — durante
+umas semanas TODAS as notas do Vivino e TODOS os preços de mercado que lá
+estavam tinham vindo daí, com a mesma força de uma pesquisa Google a
+sério, e portanto a tapá-la. A `catalogo.forca()` passou a olhar para o
+CAMPO e não só para a origem: o que se lê no rótulo (castas, cor, teor,
+região) vindo de uma garrafeira continua a valer 3 — quem tem a garrafa na
+mão sabe melhor —, mas a nota e o preço vindos de lá valem 2, abaixo desta
+função. Interessa-nos diretamente: é o que garante que uma verificação
+paga aqui não é apagada amanhã por um número que alguém copiou à pressa
+para a sua garrafeira. Fonte de verdade: `db/catalogo-partilhado.sql` no
+repo Garrafeira.
+
 **O "barato/justo/caro" também não entra, e por outra razão:** não é do
 vinho, é de uma CARTA. O mesmo Papa Figos é barato a 22 € e caro a 45 €, e
 nem o vinho mudou. O que atravessa é o preço de MERCADO (`preco_medio`), e a
