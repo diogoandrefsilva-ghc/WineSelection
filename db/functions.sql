@@ -3,9 +3,19 @@
 -- Ordem: schema.sql -> functions.sql -> policies.sql
 -- =====================================================================
 
+-- As duas levam `search_path` fixo. Nenhuma é SECURITY DEFINER e tudo o que
+-- lhes interessa já vai qualificado, por isso o risco aqui é pequeno — mas
+-- é a regra que TODAS as funções da Garrafeira cumprem desde sempre, e uma
+-- regra que vale para umas e não para outras é uma regra que um dia se
+-- esquece na que importa. Mais uma em que a lição tinha ficado só de um
+-- lado (ver "As lições da Garrafeira têm de atravessar para cá" no
+-- CLAUDE.md). Aplicado em produção pela migração 13 do repo Garrafeira,
+-- `db/migracao-blindagem.sql`.
+
 -- Admin? (compara email autenticado com o admin fixo)
 CREATE OR REPLACE FUNCTION wineselection.is_admin()
   RETURNS boolean LANGUAGE sql STABLE
+  SET search_path TO 'wineselection', 'public'
 AS $$
   SELECT auth.email() = 'diogo.andre.f.silva@gmail.com';
 $$;
@@ -13,6 +23,7 @@ $$;
 -- Utilizador tem acesso? (email consta em allowed_users)
 CREATE OR REPLACE FUNCTION wineselection.is_allowed()
   RETURNS boolean LANGUAGE sql STABLE
+  SET search_path TO 'wineselection', 'public'
 AS $$
   SELECT auth.email() IN (SELECT email FROM wineselection.allowed_users);
 $$;

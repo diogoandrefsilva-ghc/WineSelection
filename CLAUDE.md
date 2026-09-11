@@ -315,8 +315,17 @@ corria desde 29 de agosto, por isso o log dela estava limpo. **Um log limpo
 numa app que não corre não é saúde, é desuso**, e foi só por isso que
 ninguém deu por nada.
 
+Aconteceu uma terceira vez, em setembro, e desta já não foi no Gemini: o
+`search_path` fixo nas funções SQL. Todas as da Garrafeira o têm desde
+sempre; as daqui (`is_admin`, `is_allowed`) não tinham nenhuma. Foi o linter
+do Supabase que o apontou. O risco concreto era pequeno — nenhuma é
+SECURITY DEFINER — mas o padrão é o mesmo: **a regra existia num repo e não
+no outro.**
+
 Por isso: quando mexeres na escolha de modelo, nos parâmetros da chamada ou
 no tratamento de erros do Gemini de UM lado, vai ver o outro no MESMO dia.
+E vale para mais do que o Gemini — corre o linter do Supabase de vez em
+quando e olha para os dois schemas, não só para aquele em que estás.
 O `sync_log` das duas apps é o sítio onde isso se confirma — compara a
 última chamada de cada uma antes de assumir que a que está calada está bem.
 
