@@ -196,7 +196,7 @@ function usageMetadata(raw: any): UsageMetadata | null {
    se falou com o Gemini de todo, e é esse o número que interessa ver. */
 const CUSTO_VERIFICACAO_EUR = 0.01;
 
-/* ── CATÁLOGO PARTILHADO (schema `catalogo`) ──
+/* ── CATÁLOGO PARTILHADO (schema `winecatalog`) ──
    Esta função é a mais cara das três (pesquisa Google a sério, pedida à
    mão) e por isso é a que mais ganha em não repetir trabalho: se alguém já
    verificou este vinho — aqui ou na Garrafeira — a resposta já existe.
@@ -226,12 +226,12 @@ async function catalogoRpc(fn: string, corpo: Record<string, unknown>, signal?: 
     headers: {
       apikey: SB_SRV, Authorization: "Bearer " + SB_SRV,
       "Content-Type": "application/json",
-      "Content-Profile": "catalogo", "Accept-Profile": "catalogo",
+      "Content-Profile": "winecatalog", "Accept-Profile": "winecatalog",
     },
     body: JSON.stringify(corpo),
     ...(signal ? { signal } : {}),
   });
-  if (!r.ok) throw new Error(`catalogo ${fn} ${r.status}`);
+  if (!r.ok) throw new Error(`winecatalog ${fn} ${r.status}`);
   return await r.json();
 }
 
@@ -486,7 +486,7 @@ async function processarVerificacao(
        mercado) respondem já; ao Gemini vão só os que sobram. Quando não
        sobra nenhum, esta função não chega a falar com o Gemini — e continua
        a ser verificação a sério, porque o que está no catálogo foi lá posto
-       por uma pesquisa a sério (a `catalogo.forca` não deixa entrar
+       por uma pesquisa a sério (a `winecatalog.forca` não deixa entrar
        estimativas de memória). */
     const conhecidos = await catalogoProcurarLote(
       vinhos.map((v) => ({ nome: v.nome, ano: anoDoNome(v.nome) })),
@@ -595,7 +595,7 @@ async function processarVerificacao(
     await atualizarAnalise(analiseId, quem, { verificacao_estado: "concluido", verificacao });
 
     /* E o que se acabou de pesquisar vai para o catálogo — é uma pesquisa
-       Google a sério, a mais forte que aqui se produz (ver `catalogo.forca`),
+       Google a sério, a mais forte que aqui se produz (ver `winecatalog.forca`),
        e é o que faz a Garrafeira não voltar a pagar por este mesmo vinho.
        Depois de a verificação estar fechada: quem está à espera não espera
        por isto. */

@@ -197,7 +197,7 @@ só a estimativa aproximada.
   resposta era pior do que pesquisar, que quem escolheu estes cinco vinhos
   à mão escolheu-os porque quer saber. Continua a ser verificação a sério:
   o que está no catálogo foi lá posto por uma pesquisa a sério, e a
-  `catalogo.forca()` não deixa entrar estimativas de memória. O resultado
+  `winecatalog.forca()` não deixa entrar estimativas de memória. O resultado
   traz `origem:'catalogo'` e a data, e a app diz-o.
 - Mesma arquitetura assíncrona da `sugerir-vinho` (`EdgeRuntime.waitUntil` +
   polling), mas mexe na MESMA linha de `wineselection.analises` — só em
@@ -229,16 +229,24 @@ na MESMA forma de `sugestoes[].pontuacao`/`precoAvaliacao`) ou `'erro'`
 ## O catálogo partilhado com a Garrafeira (não pagar duas vezes o mesmo)
 Há uma segunda app de vinhos no mesmo projeto Supabase — a **Garrafeira** —
 e as duas faziam a mesma pergunta ao Gemini sobre os mesmos vinhos, cada uma
-por sua conta. O schema **`catalogo`** é a memória comum: o que já se
+por sua conta. O schema **`winecatalog`** é a memória comum: o que já se
 pesquisou (nas duas apps) e o que alguém já confirmou por ter a garrafa em
-casa. **Fonte de verdade: `db/catalogo-partilhado.sql` no repo Garrafeira**
-— não há cópia aqui de propósito (ver `db/README.md`).
+casa. **Fonte de verdade: `db/catalogo.sql` no repo WineCatalog** — não há
+cópia aqui de propósito (ver `db/README.md`).
+
+**Chamou-se `catalogo` até setembro de 2026**, num schema só dele e com a
+definição dentro do repo Garrafeira. Mudou-se de casa porque não era de
+ninguém: passou a ter uma app própria (a WineCatalog), um dono próprio
+(`winecatalog.config.admin_email`, que não é o admin desta app nem o da
+Garrafeira) e um ecrã onde se vê o que lá está. Para esta app mudou uma
+linha em cada Edge Function — o `Accept-Profile`/`Content-Profile`. Os
+nomes das funções e as respostas são os mesmos.
 
 Onde é que isto entra nesta app, e o que muda:
 
 - **`sugerir-vinho`** — a `pontuacaoAprox` de toda a carta era sempre uma
   SEGUNDA chamada ao Gemini, a estimar ~40 vinhos de memória. Agora
-  pergunta-se primeiro ao catálogo (`catalogo.procurar_lote`, **uma** ida ao
+  pergunta-se primeiro ao catálogo (`winecatalog.procurar_lote`, **uma** ida ao
   PostgREST para a carta toda): os vinhos que alguém já pesquisou a sério
   respondem já, e ao Gemini vão só os que sobram. Quando não sobra nenhum,
   essa chamada não acontece.
@@ -255,7 +263,7 @@ resto. Ela é uma estimativa de memória, sem pesquisa, e esta app inteira
 está construída à volta de não a disfarçar de verificação — deixá-la entrar
 aqui era pior do que isso: era espalhá-la pelas duas apps com ar de facto
 pesquisado, e depois já ninguém sabia de onde tinha vindo. A
-`catalogo.forca()` do lado do SQL recusa-a mesmo que um dia alguém tente
+`winecatalog.forca()` do lado do SQL recusa-a mesmo que um dia alguém tente
 mandá-la. Só `sugestoes[].pontuacao` (que vem com pesquisa e fonte) e a
 `verificar-vinhos` é que escrevem.
 
@@ -264,14 +272,14 @@ mandá-la. Só `sugestoes[].pontuacao` (que vem com pesquisa e fonte) e a
 campos do seu vinho, e o trigger dela leva isso para o catálogo — durante
 umas semanas TODAS as notas do Vivino e TODOS os preços de mercado que lá
 estavam tinham vindo daí, com a mesma força de uma pesquisa Google a
-sério, e portanto a tapá-la. A `catalogo.forca()` passou a olhar para o
+sério, e portanto a tapá-la. A `winecatalog.forca()` passou a olhar para o
 CAMPO e não só para a origem: o que se lê no rótulo (castas, cor, teor,
 região) vindo de uma garrafeira continua a valer 3 — quem tem a garrafa na
 mão sabe melhor —, mas a nota e o preço vindos de lá valem 2, abaixo desta
 função. Interessa-nos diretamente: é o que garante que uma verificação
 paga aqui não é apagada amanhã por um número que alguém copiou à pressa
-para a sua garrafeira. Fonte de verdade: `db/catalogo-partilhado.sql` no
-repo Garrafeira.
+para a sua garrafeira. Fonte de verdade: `db/catalogo.sql` no repo
+WineCatalog.
 
 **O "barato/justo/caro" também não entra, e por outra razão:** não é do
 vinho, é de uma CARTA. O mesmo Papa Figos é barato a 22 € e caro a 45 €, e

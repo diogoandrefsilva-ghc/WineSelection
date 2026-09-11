@@ -344,7 +344,7 @@ function fontesParaCatalogo(cand: any): { titulo: string; url: string }[] {
   return out;
 }
 
-/* ── CATÁLOGO PARTILHADO (schema `catalogo`) ──
+/* ── CATÁLOGO PARTILHADO (schema `winecatalog`) ──
    A memória comum desta app e da Garrafeira, no mesmo projeto Supabase.
    Serve duas perguntas que aqui se pagam caro:
    · a pontuação de um vinho da carta — que hoje sai de uma SEGUNDA chamada
@@ -355,7 +355,7 @@ function fontesParaCatalogo(cand: any): { titulo: string; url: string }[] {
 
    Três regras que não são detalhe:
    · a CHAVE (o que faz dois vinhos serem o mesmo vinho) vive só no SQL:
-     daqui vai o nome e o ano em cru. Ver a nota em `catalogo.chave()`;
+     daqui vai o nome e o ano em cru. Ver a nota em `winecatalog.chave()`;
    · a `pontuacaoAprox` NUNCA é escrita no catálogo. É uma estimativa de
      memória, e esta app inteira está construída à volta de não a disfarçar
      de verificação — espalhá-la pelas duas apps com ar de facto pesquisado
@@ -382,12 +382,12 @@ async function catalogoRpc(fn: string, corpo: Record<string, unknown>, signal?: 
     headers: {
       apikey: SB_SRV, Authorization: "Bearer " + SB_SRV,
       "Content-Type": "application/json",
-      "Content-Profile": "catalogo", "Accept-Profile": "catalogo",
+      "Content-Profile": "winecatalog", "Accept-Profile": "winecatalog",
     },
     body: JSON.stringify(corpo),
     ...(signal ? { signal } : {}),
   });
-  if (!r.ok) throw new Error(`catalogo ${fn} ${r.status}`);
+  if (!r.ok) throw new Error(`winecatalog ${fn} ${r.status}`);
   return await r.json();
 }
 
@@ -436,7 +436,7 @@ async function catalogoJuntar(
 
 /* A colheita, quando a carta a escreve ("Papa Figos 2020"). Vale a pena
    tirá-la: com ano, o catálogo responde com a nota DAQUELA colheita; sem
-   ele, responde com a de uma recente e diz qual (ver `catalogo.procurar`). */
+   ele, responde com a de uma recente e diz qual (ver `winecatalog.procurar`). */
 function anoDoNome(nome: string): number | null {
   const m = String(nome || "").match(/\b(19|20)\d{2}\b/);
   if (!m) return null;
