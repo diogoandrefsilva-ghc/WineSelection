@@ -380,7 +380,7 @@ e o `resultado jsonb` de `db/schema.sql`).
 própria função (`verificarCoerencia`), ver abaixo.
 
 ## O registo central de acessos ao Gemini (schema `ia_uso`)
-São **cinco** apps neste projeto Supabase a chamar o Gemini, por oito Edge
+São **seis** apps neste projeto Supabase a chamar o Gemini, por nove Edge
 Functions, e cada uma tinha só o seu `sync_log` — a pergunta *"quanto é que
 isto custa ao todo?"* não tinha onde ser respondida. O schema **`ia_uso`**
 é uma linha por chamada (app, função, modelo, tokens, custo estimado,
@@ -390,6 +390,12 @@ duração, quem, erro).
 verdade do schema é o `db/ia_uso.sql` desse repo. Aqui fica só o que é
 preciso saber para não partir nada:
 
+- **Um 200 com o corpo VAZIO não é resposta, e não pode passar por
+  sucesso.** O modelo gasta o orçamento a pensar e não escreve uma letra —
+  HTTP 200, `candidatesTokenCount: 0`. A `verificar-vinhos` fechava a análise em `concluido` com a verificação VAZIA — precisamente a função cuja razão de existir é não fingir que verificou (ver acima, "Sem fallback sem pesquisa"); a `sugerir-vinho` já dava erro, mas nunca tentava o modelo seguinte. Agora o corpo lê-se DENTRO do
+  ciclo dos modelos (um vazio passa ao seguinte) e, se nenhum escrever,
+  fecha em **erro** com o `finishReason` à frente. A lição inteira, com o
+  caso que a pagou, está no `CLAUDE.md` da WineCatalog ("O 200 vazio").
 - **Daqui escrevem duas funções**: `sugerir-vinho.ts` e
   `verificar-vinhos.ts`, as duas com `app: "wineselection"`. A
   `registarIaUso()` é chamada no fim do `registar()` local — o mesmo

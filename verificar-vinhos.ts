@@ -172,7 +172,7 @@ function normResultadoVerif(raw: unknown, nomeEsperado: string): Record<string, 
    Garrafeira já contava tokens e esta app não contava nada; sem isto não
    há como ver quanto é que o catálogo partilhado está a poupar aqui, que é
    onde a poupança é maior (esta é a chamada mais cara das três). */
-type UsageMetadata = { promptTokenCount: number; candidatesTokenCount: number; totalTokenCount: number };
+type UsageMetadata = { promptTokenCount: number; candidatesTokenCount: number; thoughtsTokenCount: number; totalTokenCount: number };
 
 function usageMetadata(raw: any): UsageMetadata | null {
   const toInt = (v: unknown) => {
@@ -184,6 +184,7 @@ function usageMetadata(raw: any): UsageMetadata | null {
   const out = {
     promptTokenCount: toInt(src.promptTokenCount),
     candidatesTokenCount: toInt(src.candidatesTokenCount),
+    thoughtsTokenCount: toInt(src.thoughtsTokenCount),
     totalTokenCount: toInt(src.totalTokenCount),
   };
   return (out.promptTokenCount || out.candidatesTokenCount || out.totalTokenCount) ? out : null;
@@ -586,6 +587,9 @@ async function processarVerificacao(
     if (ctrl.signal.aborted) throw new DOMException("timeout", "AbortError");
     console.log("VERIFICAR-VINHOS candidatos:", candidatos.join(", "));
     let g: Response | null = null;
+    let gd: any = null;
+    let texto2 = "";
+    let vazioMotivo = "";
 
     for (let ci = 0; ci < candidatos.length && !ctrl.signal.aborted; ci++) {
       model = candidatos[ci];
@@ -596,12 +600,27 @@ async function processarVerificacao(
         if (g.status === 400) continue;
         break;
       }
-      if (g && g.ok) break;
+      /* Um 200 com o corpo VAZIO não é resposta — é o modelo a gastar o
+         orçamento a pensar e a não escrever nada. Lê-se o corpo AQUI para
+         se poder passar ao modelo seguinte, e sobretudo para isto NÃO
+         fechar como uma verificação concluída sem um único resultado.
+         Ver o CLAUDE.md da WineCatalog, "O 200 vazio". */
+      if (g && g.ok) {
+        gd = await g.json();
+        const cand = gd?.candidates?.[0];
+        vazioMotivo = String(cand?.finishReason ?? "") || "resposta vazia";
+        texto2 = (cand?.content?.parts ?? []).map((p: any) => p?.text ?? "").join("").trim();
+        console.log("VERIFICAR-VINHOS resposta:", model, "finishReason:", vazioMotivo,
+                    "texto:", texto2.length, "tokens saída:", gd?.usageMetadata?.candidatesTokenCount ?? 0);
+        if (texto2) break;
+        g = null;
+        continue;
+      }
       if (g && g.status === 404) { _models = null; continue; }
       if (g && !transitorio(g.status)) break;
     }
 
-    if (!g || !g.ok) {
+    if (g && !g.ok) {
       const status = g?.status ?? 502;
       const detail = g ? await g.text() : "";
       let msg = "";
@@ -614,9 +633,23 @@ async function processarVerificacao(
       return;
     }
 
-    const gd = await g.json();
+    /* Nenhum modelo escreveu uma letra. Isto NUNCA pode fechar como
+       "concluido": uma verificação vazia lia-se como "não há nada a dizer
+       sobre estes cinco vinhos", que é o contrário do que se passou — e
+       esta função existe precisamente para não fingir que verificou. */
+    if (!texto2) {
+      await registar("erro", {
+        passo: "gemini_vazio", modelo: model, finishReason: vazioMotivo || null,
+        ...(usageMetadata(gd) ? { usageMetadata: usageMetadata(gd) } : {}),
+      }, quem);
+      await atualizarAnalise(analiseId, quem, {
+        verificacao_estado: "erro",
+        verificacao_erro: `o modelo não devolveu resposta (${vazioMotivo || "vazia"}) — tenta outra vez`,
+      });
+      return;
+    }
+
     const usage = usageMetadata(gd);
-    const texto2 = (gd?.candidates?.[0]?.content?.parts ?? []).map((p: any) => p?.text ?? "").join("").trim();
     const parsed: any = extrairJson(texto2);
     const brutos = Array.isArray(parsed?.resultados) ? parsed.resultados : [];
     const daIA = paraIA.map((v, i) => normResultadoVerif(brutos[i], v.nome));

@@ -286,7 +286,7 @@ function normVinhoCarta(raw: unknown): Record<string, unknown> | null {
    `usageMetadata` vem da própria API e é FACTO. A `sugerir-vinho` faz até
    duas chamadas por análise (a pesada e a leve das pontuações), por isso
    somam-se — uma só das duas contava metade da história. */
-type UsageMetadata = { promptTokenCount: number; candidatesTokenCount: number; totalTokenCount: number };
+type UsageMetadata = { promptTokenCount: number; candidatesTokenCount: number; thoughtsTokenCount: number; totalTokenCount: number };
 
 function usageMetadata(raw: any): UsageMetadata | null {
   const toInt = (v: unknown) => {
@@ -298,6 +298,7 @@ function usageMetadata(raw: any): UsageMetadata | null {
   const out = {
     promptTokenCount: toInt(src.promptTokenCount),
     candidatesTokenCount: toInt(src.candidatesTokenCount),
+    thoughtsTokenCount: toInt(src.thoughtsTokenCount),
     totalTokenCount: toInt(src.totalTokenCount),
   };
   return (out.promptTokenCount || out.candidatesTokenCount || out.totalTokenCount) ? out : null;
@@ -308,6 +309,7 @@ function somarUsage(total: UsageMetadata | null, add: UsageMetadata | null): Usa
   return {
     promptTokenCount: total.promptTokenCount + add.promptTokenCount,
     candidatesTokenCount: total.candidatesTokenCount + add.candidatesTokenCount,
+    thoughtsTokenCount: total.thoughtsTokenCount + add.thoughtsTokenCount,
     totalTokenCount: total.totalTokenCount + add.totalTokenCount,
   };
 }
@@ -923,6 +925,9 @@ async function processarAnalise(
     if (ctrl.signal.aborted) throw new DOMException("timeout", "AbortError");
     console.log("SUGERIR-VINHO candidatos:", candidatos.join(", "));
     let g: Response | null = null;
+    let gd: any = null;
+    let textoResp = "";
+    let vazioMotivo = "";
 
     for (let ci = 0; ci < candidatos.length && !ctrl.signal.aborted; ci++) {
       model = candidatos[ci];
@@ -934,15 +939,31 @@ async function processarAnalise(
         if (g.status === 400) continue; // esta variante não é aceite por este modelo — tenta a seguinte
         break; // sucesso, ou erro definitivo — não continua a testar variantes deste modelo
       }
-      if (g && g.ok) break;
+      /* Um 200 com o corpo VAZIO não é resposta — é o modelo a gastar o
+         orçamento a pensar e a não escrever nada. Lê-se o corpo AQUI para
+         se poder passar ao modelo seguinte; ler só depois do ciclo fazia
+         desta avaria o fim da linha, com a análise a morrer num
+         "resposta ilegível" que não dizia o que se tinha passado.
+         Ver o CLAUDE.md da WineCatalog, "O 200 vazio". */
+      if (g && g.ok) {
+        gd = await g.json();
+        const cand0 = gd?.candidates?.[0];
+        vazioMotivo = String(cand0?.finishReason ?? "") || "resposta vazia";
+        textoResp = (cand0?.content?.parts ?? []).map((p: any) => p?.text ?? "").join("").trim();
+        console.log("SUGERIR-VINHO resposta:", model, "finishReason:", vazioMotivo,
+                    "texto:", textoResp.length, "tokens saída:", gd?.usageMetadata?.candidatesTokenCount ?? 0);
+        if (textoResp) break;
+        g = null;
+        continue;
+      }
       if (g && g.status === 404) { _models = null; continue; } // saiu do catálogo — tenta o modelo seguinte
       if (g && !transitorio(g.status)) break; // erro definitivo (ex: 400 em todas as variantes) — não vale a pena continuar
       // transitório (429/500/503): tenta já o modelo seguinte, sem esperar
     }
 
-    if (!g || !g.ok) {
-      const status = g?.status ?? 502;
-      const detail = g ? await g.text() : "";
+    if (g && !g.ok) {
+      const status = g.status;
+      const detail = await g.text();
       console.error("gemini", model, status, detail.slice(0, 500));
       let msg = "";
       try { msg = JSON.parse(detail)?.error?.message ?? ""; } catch (_) { /**/ }
@@ -957,11 +978,27 @@ async function processarAnalise(
       return;
     }
 
-    const gd = await g.json();
+    /* Nenhum modelo escreveu uma letra (ou nenhum chegou sequer a
+       responder). Não é o mesmo que "resposta ilegível" — ali havia texto
+       e não se entendeu; aqui não houve texto nenhum. */
+    if (!g || !textoResp) {
+      usageTotal = somarUsage(usageTotal, usageMetadata(gd));
+      await registar("erro", {
+        passo: g ? "gemini_vazio" : "sem-resposta", modelo: model, pesquisa: comPesquisa,
+        finishReason: vazioMotivo || null,
+        ...(usageTotal ? { usageMetadata: usageTotal } : {}),
+      }, quem);
+      await atualizarAnalise(analiseId, quem, {
+        estado: "erro",
+        erro: `o modelo não devolveu resposta (${vazioMotivo || "vazia"}) — tenta outra vez`,
+      });
+      return;
+    }
+
     usageTotal = somarUsage(usageTotal, usageMetadata(gd));
     chamadas++;
     const cand = gd?.candidates?.[0];
-    const texto2 = (cand?.content?.parts ?? []).map((p: any) => p?.text ?? "").join("").trim();
+    const texto2 = textoResp;
     const parsed: any = extrairJson(texto2);
     if (!parsed) {
       console.error("SUGERIR-VINHO resposta ilegível:", texto2.slice(0, 400));
