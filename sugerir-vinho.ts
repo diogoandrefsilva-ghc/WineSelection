@@ -752,6 +752,51 @@ async function registar(estado: string, detalhe: Record<string, unknown>, quem: 
   } catch (e) {
     console.log("SUGERIR-VINHO sync_log erro:", String((e as Error).message).slice(0, 200));
   }
+  await registarIaUso("sugerir-vinho", estado, detalhe, quem);
+}
+
+/* Espelho em `ia_uso.registos` — schema à parte, no MESMO projeto Supabase,
+   partilhado pelas cinco apps que chamam o Gemini (ver o CLAUDE.md da
+   WineCatalog, "O registo central de acessos ao Gemini"). O MESMO `detalhe`
+   de cima, com tokens/modelo/custo também promovidos a colunas, para uma
+   tabela que soma o gasto do Gemini ao todo em vez de app a app. Nunca deita
+   a resposta abaixo por isto falhar — mesma regra do `registar()` local. */
+async function registarIaUso(funcao: string, estado: string, detalhe: Record<string, unknown>, quem: string | null): Promise<void> {
+  try {
+    const usage = (detalhe.usageMetadata ?? null) as
+      | { promptTokenCount?: number; candidatesTokenCount?: number; thoughtsTokenCount?: number; totalTokenCount?: number }
+      | null;
+    const pesquisa = detalhe.pesquisa as unknown;
+    await fetch(`${SB_URL}/rest/v1/registos`, {
+      method: "POST",
+      headers: {
+        apikey: SB_SRV,
+        Authorization: `Bearer ${SB_SRV}`,
+        "Content-Type": "application/json",
+        "Content-Profile": "ia_uso",
+        Prefer: "return=minimal",
+      },
+      body: JSON.stringify({
+        app: "wineselection", funcao,
+        estado: estado === "pedido" || estado === "erro" ? estado : "ok",
+        modelo: (detalhe.modelo as string | undefined) ?? null,
+        pesquisa_web: typeof pesquisa === "boolean" ? pesquisa : (typeof pesquisa === "string" ? pesquisa.length > 0 : null),
+        tokens_entrada: usage?.promptTokenCount ?? null,
+        tokens_saida: usage?.candidatesTokenCount ?? null,
+        tokens_pensamento: usage?.thoughtsTokenCount ?? null,
+        tokens_total: usage?.totalTokenCount ?? null,
+        custo_estimado_eur: (detalhe.custo_estimado_eur as number | undefined) ?? null,
+        duracao_ms: (detalhe.ms as number | undefined) ?? null,
+        quem,
+        erro: estado === "erro"
+          ? (String((detalhe.erro as string | undefined) ?? (detalhe.passo as string | undefined) ?? "").slice(0, 500) || null)
+          : null,
+        detalhe,
+      }),
+    });
+  } catch (_e) {
+    // nunca deita a chamada principal abaixo
+  }
 }
 
 /* Cria a linha em `wineselection.analises` (estado 'pendente' por omissão)
