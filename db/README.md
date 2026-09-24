@@ -26,9 +26,9 @@ depois se cola no SQL Editor do Supabase.
 Não vive neste repo, e é de propósito. É a memória comum das duas apps de
 vinhos: o que a IA já procurou (aqui ou lá) e o que alguém já confirmou por
 ter a garrafa em casa. Antes de pagar uma pesquisa, as Edge Functions desta
-app perguntam-lhe — é isso que faz a `pontuacaoAprox` de metade de uma carta
-deixar de ser um palpite do modelo e passar a ser uma nota pesquisada, e a
-`verificar-vinhos` responder por vezes sem falar com o Gemini de todo.
+app perguntam-lhe — é daí que sai tudo o que a lista da carta sabe de cada
+vinho (o resto diz "sem dados", nunca um palpite), e é por isso que a
+`verificar-vinhos` responde por vezes sem falar com o Gemini de todo.
 
 **A fonte de verdade é o repo Garrafeira: `db/catalogo-partilhado.sql`.**
 Não há cópia aqui, e não deve haver: um schema escrito em dois sítios é um

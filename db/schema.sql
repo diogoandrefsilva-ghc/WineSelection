@@ -60,13 +60,13 @@ CREATE TABLE IF NOT EXISTS wineselection.analises (
   estado     text NOT NULL DEFAULT 'pendente',  -- 'pendente' | 'concluido' | 'erro'
   resultado  jsonb,                              -- só preenchido quando estado='concluido'
   erro       text,                               -- só preenchido quando estado='erro'
-  -- Verificação "a sério" opcional, pedida à mão depois da análise: o
-  -- utilizador escolhe até 5 vinhos de `resultado.vinhosCarta` (que só têm
-  -- pontuacaoAprox de memória) e a Edge Function `verificar-vinhos` faz
-  -- pesquisa Google real só para esses. Fica na MESMA linha porque pertence
-  -- à mesma análise — null enquanto nunca foi pedida.
+  -- Pesquisa "a sério" opcional, pedida à mão depois da análise: o
+  -- utilizador escolhe até 4 vinhos de `resultado.vinhosCarta` que o
+  -- catálogo não conhece e a Edge Function `verificar-vinhos` faz pesquisa
+  -- Google real só para esses (e grava-os no catálogo). Fica na MESMA linha
+  -- porque pertence à mesma análise — null enquanto nunca foi pedida.
   verificacao_estado text,                        -- null | 'pendente' | 'concluido' | 'erro'
-  verificacao         jsonb,                       -- [{nome,pontuacao,precoAvaliacao}], só quando concluido
+  verificacao         jsonb,                       -- {versao:2,vinhos,sugestoes,…} (antigas: [{nome,pontuacao,precoAvaliacao}]), só quando concluido
   verificacao_erro    text,                        -- só quando erro
   criado_em  timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT analises_pkey PRIMARY KEY (id),

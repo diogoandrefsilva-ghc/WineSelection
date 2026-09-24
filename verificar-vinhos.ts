@@ -1,12 +1,15 @@
 // supabase/functions/verificar-vinhos/index.ts
-// WineSelection — Verificação "a sério" (pesquisa Google real) para até 5
-// vinhos escolhidos à mão pelo utilizador na lista completa da carta
-// (`resultado.vinhosCarta`, que na análise principal só tem
-// `pontuacaoAprox` de memória, sem pesquisa — ver sugerir-vinho.ts).
-// Pedir isto para os 20-40 vinhos todos foi o que causava os timeouts que
-// levaram a separar `pontuacaoAprox` numa 2ª chamada leve nessa função;
-// isto dá ao utilizador a opção de pagar o custo da pesquisa real só para
-// os poucos vinhos que ele escolhe, não para a carta toda.
+// WineSelection — Pesquisa "a sério" (Google real) para até 4 vinhos que o
+// catálogo ainda não conhece, escolhidos à mão na carta já lida
+// (`resultado.vinhosCarta`, pelo índice). É a ÚNICA pesquisa paga desta app
+// desde que a `sugerir-vinho` deixou de pesquisar (ver "Ou sabemos ou não
+// sabemos" no cabeçalho dela), e faz três coisas:
+//   1. pesquisa nota, preço de loja, castas, região, cor e harmonização;
+//   2. volta a RECOMENDAR sobre a carta inteira — o que já se sabia mais o
+//      que acabou de chegar (a mesma `recomendar` da `sugerir-vinho`,
+//      duplicada de propósito);
+//   3. guarda o que encontrou no catálogo partilhado, que é o que faz a
+//      próxima carta com estes vinhos — nesta app ou noutra — sair de graça.
 //
 // Mesma arquitetura assíncrona do sugerir-vinho.ts (EdgeRuntime.waitUntil +
 // polling do lado do browser) — mexe na MESMA linha de
@@ -26,12 +29,11 @@ const GEMINI_KEY = Deno.env.get("GEMINI_API_KEY")!;
 const SB_URL = Deno.env.get("SUPABASE_URL")!;
 const SB_SRV = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const GAPI = "https://generativelanguage.googleapis.com/v1beta";
-// Sem imagens, só texto + pesquisa — mais leve que a análise principal, mas
-// a pesquisa Google continua a ser lenta/imprevisível, por isso o mesmo
-// tipo de orçamento generoso.
+// Sem imagens, só texto + pesquisa, mas a pesquisa Google é
+// lenta/imprevisível — e a seguir ainda há a recomendação.
 const PROC_TIMEOUT_MS = 90_000;
 const SYNC_TIMEOUT_MS = 10_000;
-const MAX_VINHOS = 5;
+const MAX_VINHOS = 4;
 
 /* ── Escolha do modelo (mesma estratégia das funções irmãs) ── */
 let _models: string[] | null = null;
@@ -98,7 +100,7 @@ const CORS = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
-const CLASSIFICACOES = ["barato", "justo", "caro", "muito_caro", "desconhecido"];
+const TIPOS = ["Tinto", "Branco", "Rosé", "Verde", "Espumante", "Doce", "Outro"];
 
 function s(v: unknown, max = 120): string {
   return String(v ?? "").replace(/\s+/g, " ").trim().slice(0, max);
@@ -148,30 +150,11 @@ function normPontuacao(raw: unknown): Record<string, unknown>[] {
   }
   return out;
 }
-function normPrecoAvaliacao(raw: unknown): Record<string, unknown> {
-  const o = (raw && typeof raw === "object") ? raw as any : {};
-  const classificacao = CLASSIFICACOES.includes(o.classificacao) ? o.classificacao : "desconhecido";
-  return {
-    classificacao,
-    faixaMercado: o.faixaMercado ? s(o.faixaMercado, 40) : null,
-    comentario: s(o.comentario, 320),
-  };
-}
-function normResultadoVerif(raw: unknown, nomeEsperado: string): Record<string, unknown> {
-  const o = (raw && typeof raw === "object") ? raw as any : {};
-  return {
-    nome: nomeEsperado,
-    pontuacao: normPontuacao(o.pontuacao),
-    precoAvaliacao: normPrecoAvaliacao(o.precoAvaliacao),
-  };
-}
 
 /* ── O QUE ISTO GASTOU ──
    Duplicado da `sugerir-vinho.ts` de propósito — cada Edge Function deste
-   projeto é auto-contida (mesma convenção da calendario-sporting). A
-   Garrafeira já contava tokens e esta app não contava nada; sem isto não
-   há como ver quanto é que o catálogo partilhado está a poupar aqui, que é
-   onde a poupança é maior (esta é a chamada mais cara das três). */
+   projeto é auto-contida. Agora são até duas chamadas (pesquisar +
+   recomendar), por isso somam-se. */
 type UsageMetadata = { promptTokenCount: number; candidatesTokenCount: number; thoughtsTokenCount: number; totalTokenCount: number };
 
 function usageMetadata(raw: any): UsageMetadata | null {
@@ -189,36 +172,129 @@ function usageMetadata(raw: any): UsageMetadata | null {
   };
   return (out.promptTokenCount || out.candidatesTokenCount || out.totalTokenCount) ? out : null;
 }
+function somarUsage(total: UsageMetadata | null, add: UsageMetadata | null): UsageMetadata | null {
+  if (!add) return total;
+  if (!total) return { ...add };
+  return {
+    promptTokenCount: total.promptTokenCount + add.promptTokenCount,
+    candidatesTokenCount: total.candidatesTokenCount + add.candidatesTokenCount,
+    thoughtsTokenCount: total.thoughtsTokenCount + add.thoughtsTokenCount,
+    totalTokenCount: total.totalTokenCount + add.totalTokenCount,
+  };
+}
 
 /* Estimativa GROSSEIRA, como na irmã: os tokens são facto, o euro é um
    número redondo para dar ordem de grandeza. A pesquisa Google é faturada
    à parte, por pedido — calibra pela fatura real se isto passar de
-   curiosidade a orçamento. Zero quando a resposta veio do catálogo: aí não
-   se falou com o Gemini de todo, e é esse o número que interessa ver. */
+   curiosidade a orçamento. Zero quando a resposta veio toda do catálogo:
+   aí não se falou com o Gemini para pesquisar, e é esse o número que
+   interessa ver. */
 const CUSTO_VERIFICACAO_EUR = 0.01;
+const CUSTO_RECOMENDACAO_EUR = 0.001;
+const MODELO_LEVE = Deno.env.get("GEMINI_CHEAP_MODEL") || "gemini-flash-lite-latest";
 
 /* ── CATÁLOGO PARTILHADO (schema `winecatalog`) ──
-   Esta função é a mais cara das três (pesquisa Google a sério, pedida à
-   mão) e por isso é a que mais ganha em não repetir trabalho: se alguém já
-   verificou este vinho — aqui ou na Garrafeira — a resposta já existe.
+   Esta é a função que ENCHE o catálogo a partir desta app. É a mais cara
+   das duas (pesquisa Google a sério, pedida à mão) e por isso é a que mais
+   ganha em não repetir trabalho: se alguém já pesquisou este vinho — aqui,
+   na Garrafeira ou na WineCatalog — a resposta já existe e não se paga.
 
    O QUE VEM DO CATÁLOGO E O QUE NÃO PODE VIR. A pontuação é do VINHO e
    viaja bem. A classificação do preço ("barato/justo/caro") NÃO é do
-   vinho: é um juízo sobre A CARTA que está à frente, e o mesmo Papa Figos
-   é barato a 22 € e caro a 45 €. Por isso o catálogo guarda o preço de
-   MERCADO e a comparação com esta carta refaz-se sempre, aqui em código
-   (`avaliarPreco`) — o que é, aliás, mais honesto do que a opinião do
-   modelo: é uma conta que se mostra e que qualquer pessoa refaz à mesa.
+   vinho: é um juízo sobre A CARTA que está à frente. Por isso o catálogo
+   guarda o preço de MERCADO e a comparação com esta carta refaz-se sempre,
+   aqui em código (`avaliarPreco`) — também para o que acabou de ser
+   pesquisado: a opinião do modelo sobre o preço já não chega ao ecrã.
 
-   A trave: só se responde do catálogo quando lá estão AS DUAS COISAS (a
-   nota pesquisada e o preço de mercado). Meia resposta seria pior do que
-   pesquisar — quem escolheu estes cinco vinhos à mão escolheu-os porque
-   quer saber, e "não sei o preço" não é o que veio buscar. */
-const CATALOGO_IDADE_DIAS = 30;
+   A trave: só se responde do catálogo sem pesquisar quando lá estão AS
+   DUAS COISAS (a nota e o preço de mercado). Quem escolheu estes vinhos à
+   mão escolheu-os porque quer saber, e meia resposta não é o que veio
+   buscar. Mesma janela de idade da `sugerir-vinho` (ver lá porquê). */
+const CATALOGO_IDADE_DIAS = 180;
+const TIPOS_PARTILHADOS = ["Tinto", "Branco", "Rosé", "Espumante"];
+
+async function catalogoJuntar(
+  nome: string, produtor: string | null, ano: number | null, ficha: Record<string, unknown>, signal?: AbortSignal,
+) {
+  try {
+    if (!nome || !Object.keys(ficha).length) return;
+    await catalogoRpc("juntar", {
+      p_nome: nome, p_produtor: produtor || "", p_ano: ano,
+      p_ficha: ficha, p_origem: "ws-verificacao", p_fontes: [],
+    }, signal);
+  } catch (_) { /* o catálogo nunca falha uma verificação */ }
+}
+
+/* "18-25 €" -> 21.5, para o catálogo. Um texto sem número nenhum não
+   escreve nada: inventar um preço num catálogo partilhado era o pior que
+   daqui podia sair. */
+function precoMedioDeFaixa(txt: unknown): number | null {
+  const nums = String(txt ?? "").replace(",", ".").match(/\d+(?:\.\d+)?/g);
+  if (!nums || !nums.length) return null;
+  const vals = nums.map(Number).filter((n) => isFinite(n) && n > 0 && n < 100000);
+  if (!vals.length) return null;
+  return Math.round(((Math.min(...vals) + Math.max(...vals)) / 2) * 100) / 100;
+}
+
+/* Castas: parte-se a lista e deitam-se fora as palavras que dizem a
+   CONTAGEM das castas em vez de uma casta — senão nascia uma casta
+   fantasma chamada "Blend" ao lado das verdadeiras. */
+function castasDaLista(raw: unknown): string[] {
+  const lista = Array.isArray(raw) ? raw.map(String) : String(raw ?? "").split(/[,;/]|\se\s/i);
+  return [...new Set(lista
+    .map((x) => x.replace(/\s*\(\d+%?\)\s*/g, " ").replace(/\s+/g, " ").trim())
+    .filter((x) => x.length > 2 && x.length <= 50)
+    .filter((x) => !/^(blend|lote|v[aá]rias|diversas|field blend|castas?|misto|assemblage)$/i.test(x)))]
+    .slice(0, 12);
+}
+
+/* ── A PESQUISA A SÉRIO ──
+   Mais do que a nota e o preço: as castas, a região, a cor e a
+   harmonização. É o que a recomendação a seguir precisa para escolher com
+   fundamento, e é o que faz o catálogo servir a próxima carta — pagar uma
+   pesquisa e guardar só metade do que ela encontrou era pagar a outra
+   metade da próxima vez. */
+type VinhoPedido = {
+  i: number; nome: string; produtor: string | null; ano: number | null;
+  tipo: string | null; regiao: string | null; preco: number | null;
+};
+
+const promptVerificacao = (vinhos: VinhoPedido[]) => {
+  const lista = vinhos.map((v, k) =>
+    `${k + 1}. ${v.nome}${v.produtor ? ` — produtor: ${v.produtor}` : ""}${v.ano ? ` — colheita ${v.ano}` : ""}${v.tipo ? ` — ${v.tipo}` : ""}${v.regiao ? ` (${v.regiao})` : ""}`
+  ).join("\n");
+  return `Estes são vinhos específicos de uma carta de restaurante em Portugal.
+Para CADA UM, usa PESQUISA GOOGLE para confirmar:
+- a pontuação em sites de referência (sobretudo Vivino, escala de 5; outros
+  como Wine-Searcher também servem);
+- o preço de RETALHO em Portugal (loja ou venda direta do produtor);
+- as castas, a região, a cor e com que pratos harmoniza (do produtor ou de
+  uma loja séria).
+
+${lista}
+
+Devolve APENAS um objeto JSON com esta forma exata:
+{"resultados": [{"n": number,
+  "pontuacao": [{"fonte": string, "valor": number, "escala": number, "url": string|null}],
+  "faixaMercado": string|null,
+  "tipo": "Tinto"|"Branco"|"Rosé"|"Verde"|"Espumante"|"Doce"|"Outro"|null,
+  "regiao": string|null, "castas": [string], "harmonizacao": string|null}]}
+
+Regras:
+- Um objeto por vinho pedido; "n" é o número dele na lista acima (1 a ${vinhos.length}).
+- "pontuacao": só fontes que tenhas mesmo confirmado pela pesquisa — nunca
+  adivinhes uma nota. Sem confirmação fiável, [].
+- "faixaMercado": preço de RETALHO em euros (ex.: "6-9€"), não o do
+  restaurante; null se não encontrares um fiável.
+- "castas", "regiao", "tipo", "harmonizacao": só o que
+  encontraste; na dúvida [] ou null. Nunca inventes castas.
+Responde só com o JSON, sem texto à volta e sem blocos de código.`;
+};
 
 type Conhecido = {
-  nome: string; ano: number | null; ficha: Record<string, unknown>;
-  fontes: { titulo: string; url: string }[]; atualizadoEm: string;
+  nome: string; produtor: string; ano: number | null;
+  ficha: Record<string, unknown>; fontes: { titulo: string; url: string }[];
+  exato: boolean; mesmoAno: boolean | null; atualizadoEm: string;
 };
 
 async function catalogoRpc(fn: string, corpo: Record<string, unknown>, signal?: AbortSignal): Promise<any> {
@@ -236,42 +312,39 @@ async function catalogoRpc(fn: string, corpo: Record<string, unknown>, signal?: 
   return await r.json();
 }
 
+function normConhecido(d: any): Conhecido | null {
+  if (!d || typeof d !== "object" || !d.ficha) return null;
+  return {
+    nome: String(d.nome || ""), produtor: String(d.produtor || ""),
+    ano: typeof d.ano === "number" ? d.ano : null,
+    ficha: (d.ficha && typeof d.ficha === "object") ? d.ficha : {},
+    fontes: Array.isArray(d.fontes) ? d.fontes.slice(0, 8) : [],
+    exato: d.exato === true,
+    mesmoAno: (d.mesmoAno === null || d.mesmoAno === undefined) ? null : d.mesmoAno === true,
+    atualizadoEm: String(d.atualizadoEm || ""),
+  };
+}
+
+/* Uma carta inteira de uma vez. Quarenta idas ao PostgREST era trocar uma
+   chamada cara ao Gemini por quarenta baratas — e essa troca faz-se uma vez
+   só, aqui. A ordem da resposta é a do pedido, com `null` onde não se sabe. */
 async function catalogoProcurarLote(
-  pedidos: { nome: string; ano: number | null }[], signal?: AbortSignal,
-): Promise<(Conhecido | null)[]> {
-  if (!pedidos.length) return [];
+  pedidos: { nome: string; produtor: string | null; ano: number | null }[], signal?: AbortSignal,
+): Promise<{ lista: (Conhecido | null)[]; falhou: boolean }> {
+  if (!pedidos.length) return { lista: [], falhou: false };
   try {
     const d = await catalogoRpc("procurar_lote", {
-      p_pedidos: pedidos.map((p) => ({ nome: p.nome, produtor: "", ano: p.ano })),
+      p_pedidos: pedidos.map((p) => ({ nome: p.nome, produtor: p.produtor || "", ano: p.ano })),
       p_idade_dias: CATALOGO_IDADE_DIAS,
     }, signal);
-    if (!Array.isArray(d)) return pedidos.map(() => null);
-    return pedidos.map((_, i) => {
-      const x = d[i];
-      if (!x || typeof x !== "object" || !x.ficha) return null;
-      return {
-        nome: String(x.nome || ""),
-        ano: typeof x.ano === "number" ? x.ano : null,
-        ficha: (x.ficha && typeof x.ficha === "object") ? x.ficha : {},
-        fontes: Array.isArray(x.fontes) ? x.fontes.slice(0, 8) : [],
-        atualizadoEm: String(x.atualizadoEm || ""),
-      };
-    });
-  } catch (_) { return pedidos.map(() => null); }
+    if (!Array.isArray(d)) return { lista: pedidos.map(() => null), falhou: true };
+    return { lista: pedidos.map((_, i) => normConhecido(d[i])), falhou: false };
+  } catch (_) { return { lista: pedidos.map(() => null), falhou: true }; }
 }
 
-async function catalogoJuntar(
-  nome: string, ano: number | null, ficha: Record<string, unknown>, signal?: AbortSignal,
-) {
-  try {
-    if (!nome || !Object.keys(ficha).length) return;
-    await catalogoRpc("juntar", {
-      p_nome: nome, p_produtor: "", p_ano: ano,
-      p_ficha: ficha, p_origem: "ws-verificacao", p_fontes: [],
-    }, signal);
-  } catch (_) { /* o catálogo nunca falha uma verificação */ }
-}
-
+/* A colheita, quando a carta a escreve ("Papa Figos 2020"). Vale a pena
+   tirá-la: com ano, o catálogo responde com a nota DAQUELA colheita; sem
+   ele, responde com a de uma recente e diz qual (ver `winecatalog.procurar`). */
 function anoDoNome(nome: string): number | null {
   const m = String(nome || "").match(/\b(19|20)\d{2}\b/);
   if (!m) return null;
@@ -279,25 +352,51 @@ function anoDoNome(nome: string): number | null {
   return n >= 1900 && n <= new Date().getFullYear() + 2 ? n : null;
 }
 
-/* "18-25 €" -> 21.5, para o catálogo. Um texto sem número nenhum não
-   escreve nada: inventar um preço num catálogo partilhado era o pior que
-   daqui podia sair. */
-function precoMedioDeFaixa(txt: unknown): number | null {
-  const nums = String(txt ?? "").replace(",", ".").match(/\d+(?:\.\d+)?/g);
-  if (!nums || !nums.length) return null;
-  const vals = nums.map(Number).filter((n) => isFinite(n) && n > 0 && n < 100000);
-  if (!vals.length) return null;
-  return Math.round(((Math.min(...vals) + Math.max(...vals)) / 2) * 100) / 100;
+/* O que do catálogo interessa À MESA, numa forma só — é a mesma que a
+   `verificar-vinhos` produz depois de pesquisar (com `origem:'pesquisa'`),
+   e a app desenha as duas da mesma maneira.
+   · a nota é só a do Vivino e só na escala de 5: uma nota de 92/100 de um
+     crítico não é a mesma coisa e não se converte;
+   · `notaAno` diz de que colheita é a nota — a carta muitas vezes não dá o
+     ano, e quem está à mesa merece saber a que garrafa ela pertence.
+   Devolve null se o catálogo tiver a linha mas nada que sirva: uma linha
+   vazia não é conhecer o vinho. */
+function conhecimentoDoCatalogo(c: Conhecido | null): Record<string, unknown> | null {
+  if (!c) return null;
+  const f = c.ficha as any;
+  const nota = numOrNull(f.vivino_nota, 0, 5);
+  const u = f.vivino_url;
+  const castas = Array.isArray(f.castas) ? f.castas.map((x: unknown) => s(x, 40)).filter(Boolean).slice(0, 8) : [];
+  const notaUrl = (nota != null && typeof u === "string" && /^https?:\/\//i.test(u)) ? u.slice(0, 300) : null;
+  const out: Record<string, unknown> = {
+    nota,
+    notaUrl,
+    notaAno: nota != null ? c.ano : null,
+    pontuacao: nota != null ? [{ fonte: "Vivino", valor: nota, escala: 5, url: notaUrl }] : [],
+    precoMercado: numOrNull(f.preco_medio, 0.5, 100000),
+    castas,
+    regiao: f.regiao ? s(f.regiao, 60) : null,
+    tipo: f.tipo ? s(f.tipo, 20) : null,
+    estilo: f.estilo ? s(f.estilo, 40) : null,
+    harmonizacao: f.harmonizacao ? s(f.harmonizacao, 240) : null,
+    notasProva: f.notas_prova ? s(f.notas_prova, 240) : null,
+    produtor: c.produtor || null,
+    origem: "catalogo",
+    origemEm: c.atualizadoEm || null,
+  };
+  const temAlgo = out.nota != null || out.precoMercado != null || castas.length || out.harmonizacao || out.notasProva;
+  return temAlgo ? out : null;
 }
 
-/* A conta que substitui a opinião do modelo quando o preço de mercado já é
-   conhecido. Os cortes não são ciência — são o que se diz em qualquer
-   restaurante sobre a margem da garrafa: 2 a 3 vezes o preço de loja é o
-   normal, abaixo disso é um achado, muito acima é abuso. Ficam escritos
-   aqui e ficam escritos no COMENTÁRIO que vai para o ecrã: quem está à
-   mesa vê a conta e discorda dela se quiser, que é mais do que alguma vez
-   pôde fazer com um "caro" dito pelo modelo. */
-function avaliarPreco(precoCarta: number | null, precoMercado: number): Record<string, unknown> {
+/* A conta que substitui a opinião do modelo sobre o preço. Os cortes não
+   são ciência — são o que se diz em qualquer restaurante sobre a margem da
+   garrafa: 2 a 3 vezes o preço de loja é o normal, abaixo disso é um achado,
+   muito acima é abuso. Ficam escritos aqui e no COMENTÁRIO que vai para o
+   ecrã: quem está à mesa vê a conta e discorda dela se quiser.
+   DUPLICADA de propósito na `verificar-vinhos.ts` (cada Edge Function é
+   auto-contida) — se mexeres nos cortes de uma, mexe na outra. */
+function avaliarPreco(precoCarta: number | null, precoMercado: number | null): Record<string, unknown> | null {
+  if (precoMercado == null || precoMercado <= 0) return null;
   const faixa = `~${precoMercado.toFixed(precoMercado < 20 ? 2 : 0).replace(".", ",")} € em loja`;
   if (precoCarta == null || precoCarta <= 0) {
     return {
@@ -321,62 +420,181 @@ function avaliarPreco(precoCarta: number | null, precoMercado: number): Record<s
   };
 }
 
-/* A resposta que o catálogo consegue dar a um vinho, ou null se não
-   conseguir dar a resposta INTEIRA (ver a trave, no topo deste bloco). */
-function verificacaoDoCatalogo(
-  c: Conhecido | null, nome: string, precoCarta: number | null,
-): Record<string, unknown> | null {
-  if (!c) return null;
-  const nota = numOrNull((c.ficha as any).vivino_nota, 0, 5);
-  const mercado = numOrNull((c.ficha as any).preco_medio, 0.5, 100000);
-  if (nota == null || mercado == null) return null;
-  const url = (c.ficha as any).vivino_url;
+/* ── PASSO 3: RECOMENDAR, só com o que se sabe ──
+   DUPLICADO de propósito na `verificar-vinhos.ts`, que recomenda outra vez
+   depois de pesquisar (cada Edge Function deste projeto é auto-contida). Se
+   mexeres no prompt ou nas regras de uma, mexe na outra no MESMO dia.
+
+   O desenho que torna isto "assertivo" em vez de "adivinhado":
+   · o modelo escolhe por ÍNDICE, e só entre os vinhos marcados CONHECIDO.
+     Um índice que não exista, ou que aponte para um desconhecido, é
+     deitado fora aqui — um vinho que não está na carta, ou de que não se
+     sabe nada, não pode ser recomendado nem por engano;
+   · o modelo devolve só a ORDEM e a frase da harmonização. A nota, o preço
+     da carta e o "barato/justo/caro" do cartão montam-se aqui, a partir
+     dos dados — nunca do texto do modelo;
+   · `pesquisar` são desconhecidos que, pela cor, região e preço, valia a
+     pena pesquisar para este prato. É uma sugestão de onde gastar a
+     pesquisa, não um facto: a app só os pré-selecciona. */
+const MAX_PESQUISAR = 4;
+
+const promptRecomendacao = (
+  vinhos: Record<string, unknown>[], prato: string, orcamento: number | null,
+) => {
+  const linhas = vinhos.map((v, i) => {
+    const k = v.conhecido as any;
+    const base = [
+      `[${i}] ${v.nome}`,
+      v.produtor ? `produtor: ${v.produtor}` : "",
+      v.ano ? `colheita: ${v.ano}` : "",
+      v.tipo ? `tipo: ${v.tipo}` : (k?.tipo ? `tipo: ${k.tipo}` : ""),
+      (v.regiao || k?.regiao) ? `região: ${v.regiao || k.regiao}` : "",
+      v.preco != null ? `preço na carta: ${v.preco}€` : "preço na carta: ?",
+    ].filter(Boolean).join(" | ");
+    if (!k) return `${base} | DESCONHECIDO`;
+    const notas = (Array.isArray(k.pontuacao) ? k.pontuacao : [])
+      .map((p: any) => `${p.fonte} ${p.valor}/${p.escala}`).join(", ");
+    const factos = [
+      notas,
+      k.precoMercado != null ? `loja ~${k.precoMercado}€` : "",
+      k.castas?.length ? `castas: ${k.castas.join(", ")}` : "",
+      k.estilo ? `estilo: ${k.estilo}` : "",
+      k.harmonizacao ? `harmoniza com: ${k.harmonizacao}` : "",
+      k.notasProva ? `prova: ${k.notasProva}` : "",
+    ].filter(Boolean).join(" | ");
+    return `${base} | CONHECIDO | ${factos}`;
+  }).join("\n");
+
+  return `És um escanção num restaurante em Portugal. Esta é a carta de vinhos,
+com o que se SABE de cada vinho (marcado CONHECIDO, com os factos à frente)
+ou DESCONHECIDO (não temos dados fiáveis sobre ele).
+
+${linhas}
+
+${prato ? `O prato a acompanhar é: "${prato}".` : "Não foi indicado nenhum prato — escolhe vinhos versáteis e bem avaliados."}
+${orcamento ? `Orçamento máximo: ${orcamento}€ por garrafa (preço na carta). Só saias dele se NENHUM vinho CONHECIDO o cumprir, e di-lo na "combinacao".` : ""}
+
+Devolve APENAS um objeto JSON com esta forma exata:
+{"sugestoes": [{"i": number, "combinacao": string}], "pesquisar": [number]}
+
+Regras:
+- "sugestoes": 0 a 3 vinhos, do melhor para o pior, escolhidos SÓ entre os
+  marcados CONHECIDO. Nunca escolhas um DESCONHECIDO. Se nenhum CONHECIDO
+  servir, devolve [].
+- Pesa a harmonização com o prato (corpo, acidez, taninos, castas, o que o
+  vinho diz harmonizar), depois a nota do Vivino, depois a relação entre o
+  preço na carta e o preço de loja (2 a 3 vezes é o normal num restaurante).
+  Dá prioridade a vinhos PORTUGUESES quando houver um bom.
+- "combinacao": uma a duas frases concretas sobre porque combina com o
+  prato, apoiadas nos factos dados. Não cites notas nem preços que não
+  estejam na lista, e não inventes castas nem características.
+- "pesquisar": até ${MAX_PESQUISAR} índices de vinhos DESCONHECIDOS que, pelo tipo, região e
+  preço, seriam bons candidatos para este prato${orcamento ? " e orçamento" : ""} — os que valeria a pena
+  pesquisar. [] se não houver desconhecidos ou nenhum fizer sentido.
+Responde só com o JSON.`;
+};
+
+/* Monta o cartão de uma sugestão a partir dos DADOS (ver o bloco acima).
+   A forma é a mesma que as sugestões sempre tiveram, para a app e o
+   histórico continuarem a desenhá-las com o mesmo código. */
+function sugestaoDe(v: Record<string, unknown>, i: number, combinacao: string): Record<string, unknown> {
+  const k = (v.conhecido ?? {}) as any;
   return {
-    nome,
-    pontuacao: [{
-      fonte: "Vivino", valor: nota, escala: 5,
-      url: (typeof url === "string" && /^https?:\/\//i.test(url)) ? url.slice(0, 300) : null,
-    }],
-    precoAvaliacao: avaliarPreco(precoCarta, mercado),
-    // A app diz isto a quem pediu: uma verificação instantânea merece
-    // explicar-se, senão parece que ninguém foi pesquisar nada.
-    origem: "catalogo",
-    origemEm: c.atualizadoEm,
-    origemAno: c.ano,
+    i,
+    nome: v.nome,
+    produtor: v.produtor ?? k.produtor ?? null,
+    tipo: v.tipo ?? k.tipo ?? "Outro",
+    regiao: v.regiao ?? k.regiao ?? null,
+    casta: Array.isArray(k.castas) && k.castas.length ? k.castas.join(", ") : null,
+    precoCarta: v.preco ?? null,
+    pontuacao: Array.isArray(k.pontuacao) ? k.pontuacao : [],
+    notaAno: k.notaAno ?? null,
+    precoAvaliacao: v.precoAvaliacao ?? { classificacao: "desconhecido", faixaMercado: null, comentario: "" },
+    combinacao: s(combinacao, 400),
+    origem: k.origem ?? null,
   };
 }
 
-type VinhoPedido = { nome: string; regiao: string | null; preco: number | null };
+async function recomendar(
+  vinhos: Record<string, unknown>[], prato: string, orcamento: number | null,
+  modeloPesado: string, parentSignal: AbortSignal,
+): Promise<{ sugestoes: Record<string, unknown>[]; pesquisar: number[]; usage: UsageMetadata | null; modelo: string; falhou: boolean; motivo: string }> {
+  const out = { sugestoes: [] as Record<string, unknown>[], pesquisar: [] as number[], usage: null as UsageMetadata | null, modelo: "", falhou: false, motivo: "" };
+  if (!vinhos.length) return out;
 
-const promptVerificacao = (vinhos: VinhoPedido[]) => {
-  const lista = vinhos.map((v, i) =>
-    `${i + 1}. ${v.nome}${v.regiao ? ` (${v.regiao})` : ""}${v.preco != null ? ` — preço na carta: ${v.preco}€` : ""}`
-  ).join("\n");
-  return `Estes são vinhos específicos, escolhidos à mão por um utilizador de
-uma carta de restaurante em Portugal. Para CADA UM, usa PESQUISA GOOGLE para
-confirmar a pontuação em sites de referência (sobretudo Vivino, mas
-Wine-Searcher e outros também servem) e uma noção do preço de RETALHO em
-Portugal, para avaliar se o preço da carta é justo — tendo em conta que é
-NORMAL um restaurante cobrar 2 a 3 vezes o preço de retalho; não
-classifiques como "caro" só por ser mais caro que a loja.
+  const ctrl2 = new AbortController();
+  const onAbort = () => ctrl2.abort();
+  parentSignal.addEventListener("abort", onAbort);
+  const subTimer = setTimeout(() => ctrl2.abort(), 25_000);
+  const texto = promptRecomendacao(vinhos, prato, orcamento);
 
-${lista}
+  const tentar = async (m: string): Promise<any | null> => {
+    const r = await fetch(`${GAPI}/models/${m}:generateContent?key=${GEMINI_KEY}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: ctrl2.signal,
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: texto }] }],
+        generationConfig: {
+          temperature: 0,
+          response_mime_type: "application/json",
+          // Sem pesquisa ligada aqui, por isso o thinkingBudget:0 é seguro
+          // (é com o google_search que ele dá 400).
+          thinkingConfig: { thinkingBudget: 0 },
+        },
+      }),
+    });
+    if (!r.ok) { out.motivo = `HTTP ${r.status} (${m})`; return null; }
+    const d = await r.json();
+    out.usage = somarUsage(out.usage, usageMetadata(d));
+    const cand = d?.candidates?.[0];
+    const txt = (cand?.content?.parts ?? []).map((p: any) => p?.text ?? "").join("").trim();
+    // Um 200 vazio não é "não há nada a recomendar" — passa ao seguinte.
+    if (!txt) { out.motivo = `${cand?.finishReason || "vazio"} (${m})`; return null; }
+    const j = extrairJson(txt);
+    if (!j || typeof j !== "object") { out.motivo = `ilegível (${m})`; return null; }
+    out.modelo = m;
+    return j;
+  };
 
-Devolve APENAS um objeto JSON com esta forma exata:
-{"resultados": [{"pontuacao": [{"fonte": string, "valor": number, "escala": number, "url": string|null}],
-  "precoAvaliacao": {"classificacao": "barato"|"justo"|"caro"|"muito_caro"|"desconhecido",
-    "faixaMercado": string|null, "comentario": string}}]}
+  try {
+    const vistos = new Set<string>();
+    const ordem = [MODELO_LEVE, modeloPesado].filter((m) => m && (vistos.has(m) ? false : vistos.add(m)));
+    let j: any = null;
+    for (const m of ordem) {
+      if (ctrl2.signal.aborted) break;
+      j = await tentar(m);
+      if (j) break;
+    }
+    if (!j) { out.falhou = true; return out; }
 
-Regras:
-- Um objeto por vinho pedido, pela MESMA ordem da lista acima (${vinhos.length} no total).
-- "pontuacao": só inclui fontes que tenhas mesmo confirmado pela pesquisa —
-  nunca adivinhes uma nota. Sem confirmação fiável, "pontuacao" fica [].
-- "precoAvaliacao.faixaMercado": referência de preço de RETALHO em euros
-  (ex.: "6-9€"), não o preço do restaurante. Usa "desconhecido" se não
-  encontrares preço de retalho fiável.
-- Nunca inventes.
-Responde só com o JSON, sem texto à volta e sem blocos de código.`;
-};
+    const conhecido = (i: number) => Number.isInteger(i) && i >= 0 && i < vinhos.length && !!vinhos[i].conhecido;
+    const usados = new Set<number>();
+    for (const x of Array.isArray(j.sugestoes) ? j.sugestoes : []) {
+      const i = Number(x?.i);
+      if (!conhecido(i) || usados.has(i)) continue;
+      usados.add(i);
+      out.sugestoes.push(sugestaoDe(vinhos[i], i, String(x?.combinacao ?? "")));
+      if (out.sugestoes.length >= 3) break;
+    }
+    const pesq = new Set<number>();
+    for (const x of Array.isArray(j.pesquisar) ? j.pesquisar : []) {
+      const i = Number(x);
+      if (!Number.isInteger(i) || i < 0 || i >= vinhos.length || vinhos[i].conhecido) continue;
+      pesq.add(i);
+      if (pesq.size >= MAX_PESQUISAR) break;
+    }
+    out.pesquisar = [...pesq];
+    return out;
+  } catch (e) {
+    out.falhou = true;
+    out.motivo = String((e as Error).message || e).slice(0, 120);
+    return out;
+  } finally {
+    clearTimeout(subTimer);
+    parentSignal.removeEventListener("abort", onAbort);
+  }
+}
 
 async function emailAutorizado(auth: string, signal: AbortSignal): Promise<{ ok: boolean; email: string | null }> {
   if (!auth) return { ok: false, email: null };
@@ -469,23 +687,27 @@ async function registarIaUso(funcao: string, estado: string, detalhe: Record<str
 
 /* Confirma que a análise existe, é do próprio (JWT pass-through — a RLS de
    `analises_sel` já só deixa ver a própria, admin incluído) e já está
-   'concluido' (só faz sentido verificar vinhos de uma carta já lida). */
+   'concluido' (só faz sentido verificar vinhos de uma carta já lida). Traz
+   o `resultado` porque é dele que saem os vinhos a pesquisar (pelo índice)
+   e o que já se sabia dos outros — a recomendação refaz-se sobre a carta
+   TODA, não só sobre os que se pesquisaram agora. */
 async function buscarAnaliseDoDono(
   auth: string,
   id: number,
   signal: AbortSignal,
-): Promise<{ ok: boolean }> {
+): Promise<{ ok: boolean; resultado: any; prato: string }> {
   const r = await fetch(
-    `${SB_URL}/rest/v1/analises?id=eq.${id}&select=id,estado`,
+    `${SB_URL}/rest/v1/analises?id=eq.${id}&select=id,estado,resultado,prato`,
     {
       headers: { apikey: SB_SRV, Authorization: auth, "Accept-Profile": "wineselection" },
       signal,
     },
   );
-  if (!r.ok) return { ok: false };
+  if (!r.ok) return { ok: false, resultado: null, prato: "" };
   const rows = await r.json();
   const row = rows?.[0];
-  return { ok: !!row && row.estado === "concluido" };
+  const ok = !!row && row.estado === "concluido" && Array.isArray(row.resultado?.vinhosCarta);
+  return { ok, resultado: ok ? row.resultado : null, prato: String(row?.prato ?? "") };
 }
 
 async function atualizarAnalise(id: number, quem: string, patch: Record<string, unknown>): Promise<void> {
@@ -510,193 +732,258 @@ async function atualizarAnalise(id: number, quem: string, patch: Record<string, 
   }
 }
 
+/* A carta como a `sugerir-vinho` a deixou, pronta para a `recomendar`.
+   Um resultado antigo (antes da versão 2) não tem `conhecido` nem
+   `produtor` — os vinhos dele entram como desconhecidos, que é o que eram:
+   a `pontuacaoAprox` que lá está é uma estimativa e NÃO passa a facto. */
+function cartaDoResultado(resultado: any): Record<string, unknown>[] {
+  return (Array.isArray(resultado?.vinhosCarta) ? resultado.vinhosCarta : []).map((v: any) => {
+    const conhecido = (v?.conhecido && typeof v.conhecido === "object") ? v.conhecido : null;
+    const preco = numOrNull(v?.preco, 0, 5000);
+    return {
+      nome: s(v?.nome, 100),
+      produtor: v?.produtor ? s(v.produtor, 80) : null,
+      ano: typeof v?.ano === "number" ? v.ano : anoDoNome(String(v?.nome ?? "")),
+      tipo: TIPOS.includes(v?.tipo) ? v.tipo : null,
+      regiao: v?.regiao ? s(v.regiao, 60) : null,
+      preco,
+      conhecido,
+      precoAvaliacao: conhecido ? avaliarPreco(preco, numOrNull(conhecido.precoMercado, 0.5, 100000)) : null,
+    };
+  });
+}
+
 /* O trabalho a sério — chamado via EdgeRuntime.waitUntil. Nunca deixa a
    verificação presa em 'pendente'. Sem imagens, só texto + pesquisa; SEM
    fallback "sem-pesquisa" de propósito — sem pesquisa isto seria só mais
    uma estimativa de memória, exatamente o que o utilizador está a tentar
    fugir ao pedir uma verificação "a sério". Falha limpa em vez disso. */
 async function processarVerificacao(
-  vinhos: VinhoPedido[],
+  indices: number[],
+  resultado: any,
+  prato: string,
   quem: string,
   analiseId: number,
 ): Promise<void> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), PROC_TIMEOUT_MS);
+  const t0 = Date.now();
   let model = "gemini-flash-latest";
+  let usageTotal: UsageMetadata | null = null;
+  let chamadas = 0;
 
   try {
+    const carta = cartaDoResultado(resultado);
+    const vinhos: VinhoPedido[] = indices.map((i) => {
+      const v = carta[i] as any;
+      return { i, nome: v.nome, produtor: v.produtor, ano: v.ano, tipo: v.tipo, regiao: v.regiao, preco: v.preco };
+    });
+
     /* ── Primeiro o que já se sabe ──
-       Cada um destes vinhos é uma pesquisa Google paga. Os que já estão no
-       catálogo partilhado com a ficha COMPLETA (nota pesquisada + preço de
-       mercado) respondem já; ao Gemini vão só os que sobram. Quando não
-       sobra nenhum, esta função não chega a falar com o Gemini — e continua
-       a ser verificação a sério, porque o que está no catálogo foi lá posto
-       por uma pesquisa a sério (a `winecatalog.forca` não deixa entrar
-       estimativas de memória). */
-    const conhecidos = await catalogoProcurarLote(
-      vinhos.map((v) => ({ nome: v.nome, ano: anoDoNome(v.nome) })),
+       Alguém pode ter pesquisado um destes entretanto (aqui, na Garrafeira,
+       na WineCatalog). Os que já estão COMPLETOS no catálogo (nota + preço
+       de mercado) respondem já; ao Gemini vão só os que sobram. */
+    const cat = await catalogoProcurarLote(
+      vinhos.map((v) => ({ nome: v.nome, produtor: v.produtor, ano: v.ano })),
       ctrl.signal,
     );
-    const doCatalogo: (Record<string, unknown> | null)[] = vinhos.map((v, i) =>
-      verificacaoDoCatalogo(conhecidos[i], v.nome, v.preco)
-    );
-    const paraIA = vinhos.filter((_, i) => !doCatalogo[i]);
+    const novos: (Record<string, unknown> | null)[] = vinhos.map((_, k) => {
+      const c = conhecimentoDoCatalogo(cat.lista[k]);
+      return (c && c.nota != null && c.precoMercado != null) ? c : null;
+    });
+    const paraIA = vinhos.filter((_, k) => !novos[k]);
+    let fontesN: number | null = null;
 
-    if (!paraIA.length) {
-      const verificacao = doCatalogo as Record<string, unknown>[];
-      await registar("ok", {
-        modelo: "catalogo", vinhos: vinhos.length, catalogo: vinhos.length,
-        gemini: 0, chamadas_gemini: 0, custo_estimado_eur: 0,
-      }, quem);
-      await atualizarAnalise(analiseId, quem, { verificacao_estado: "concluido", verificacao });
-      return;
-    }
-
-    const texto = promptVerificacao(paraIA);
-    const parts = [{ text: texto }];
-
-    /* Aqui o `google_search` está SEMPRE ligado (é a razão de esta função
-       existir — ver o cabeçalho), por isso a variante "sem-pensar" era um
-       400 garantido: pedir thinkingBudget:0 com o tool de pesquisa passou
-       a ser recusado ("Request contains an invalid argument"). Gastava-se
-       uma ida ao Gemini a cada verificação para depois cair nesta, que é a
-       única que a API aceita. Sobra uma só, e é a certa. */
-    type Variante = { semThinking: boolean; label: string };
-    const variantes: Variante[] = [
-      { semThinking: false, label: "pesquisa" },
-    ];
-    const chamarGemini = (m: string, v: Variante) => {
-      const generationConfig: Record<string, unknown> = { temperature: 0 };
-      // Nunca com pesquisa ligada — e aqui ela está sempre. A trave fica
-      // para o caso de um dia alguém acrescentar uma variante sem tool.
-      if (v.semThinking) generationConfig.thinkingConfig = { thinkingBudget: 0 };
-      return fetch(`${GAPI}/models/${m}:generateContent?key=${GEMINI_KEY}`, {
+    if (paraIA.length) {
+      const parts = [{ text: promptVerificacao(paraIA) }];
+      /* Aqui o `google_search` está SEMPRE ligado (é a razão de esta função
+         existir), por isso não há variante "sem pensar": pedir
+         thinkingBudget:0 com o tool de pesquisa dá 400. */
+      const chamarGemini = (m: string) => fetch(`${GAPI}/models/${m}:generateContent?key=${GEMINI_KEY}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal: ctrl.signal,
         body: JSON.stringify({
           contents: [{ role: "user", parts }],
-          generationConfig,
+          generationConfig: { temperature: 0 },
           tools: [{ google_search: {} }],
         }),
       });
+
+      const transitorio = (st: number) => st === 429 || st === 500 || st === 503;
+      const candidatos = await candidatosModelo(ctrl.signal);
+      if (ctrl.signal.aborted) throw new DOMException("timeout", "AbortError");
+      console.log("VERIFICAR-VINHOS candidatos:", candidatos.join(", "));
+      let g: Response | null = null;
+      let gd: any = null;
+      let texto2 = "";
+      let vazioMotivo = "";
+
+      for (let ci = 0; ci < candidatos.length && !ctrl.signal.aborted; ci++) {
+        model = candidatos[ci];
+        g = await chamarGemini(model);
+        console.log("VERIFICAR-VINHOS tentativa:", model, "->", g.status);
+        /* Um 200 com o corpo VAZIO não é resposta. Lê-se o corpo AQUI para
+           se poder passar ao modelo seguinte, e sobretudo para isto NÃO
+           fechar como uma verificação concluída sem um único resultado.
+           Ver o CLAUDE.md da WineCatalog, "O 200 vazio". */
+        if (g.ok) {
+          gd = await g.json();
+          usageTotal = somarUsage(usageTotal, usageMetadata(gd));
+          chamadas++;
+          const cand = gd?.candidates?.[0];
+          vazioMotivo = String(cand?.finishReason ?? "") || "resposta vazia";
+          texto2 = (cand?.content?.parts ?? []).map((p: any) => p?.text ?? "").join("").trim();
+          console.log("VERIFICAR-VINHOS resposta:", model, "finishReason:", vazioMotivo,
+                      "texto:", texto2.length, "tokens saída:", gd?.usageMetadata?.candidatesTokenCount ?? 0);
+          if (texto2) break;
+          g = null;
+          continue;
+        }
+        if (g.status === 404) { _models = null; continue; }
+        if (!transitorio(g.status)) break;
+      }
+
+      if (g && !g.ok) {
+        const status = g.status;
+        const detail = await g.text();
+        let msg = "";
+        try { msg = JSON.parse(detail)?.error?.message ?? ""; } catch (_) { /**/ }
+        await registar("erro", { passo: "gemini", status, modelo: model, pesquisa: true, erro: (msg || detail).slice(0, 800), ms: Date.now() - t0 }, quem);
+        const erroUtilizador = transitorio(status)
+          ? "o serviço está com muita procura agora — tenta outra vez"
+          : `gemini ${status} (${model})${msg ? ": " + msg.slice(0, 200) : ""}`;
+        await atualizarAnalise(analiseId, quem, { verificacao_estado: "erro", verificacao_erro: erroUtilizador });
+        return;
+      }
+
+      /* Nenhum modelo escreveu uma letra. Isto NUNCA pode fechar como
+         "concluido": esta função existe precisamente para não fingir que
+         pesquisou. */
+      if (!texto2) {
+        await registar("erro", {
+          passo: "gemini_vazio", modelo: model, pesquisa: true, finishReason: vazioMotivo || null,
+          ...(usageTotal ? { usageMetadata: usageTotal } : {}), ms: Date.now() - t0,
+        }, quem);
+        await atualizarAnalise(analiseId, quem, {
+          verificacao_estado: "erro",
+          verificacao_erro: `o modelo não devolveu resposta (${vazioMotivo || "vazia"}) — tenta outra vez`,
+        });
+        return;
+      }
+
+      fontesN = (gd?.candidates?.[0]?.groundingMetadata?.groundingChunks ?? []).length;
+      const parsed: any = extrairJson(texto2);
+      const brutos: any[] = Array.isArray(parsed?.resultados) ? parsed.resultados : [];
+      // Pelo "n" que o modelo devolveu; pela ordem só se não o devolver.
+      const porN = (k: number) => brutos.find((b) => Number(b?.n) === k + 1) ?? (brutos.every((b) => b?.n == null) ? brutos[k] : null);
+
+      for (let k = 0; k < paraIA.length; k++) {
+        const v = paraIA[k];
+        const b = porN(k) ?? {};
+        const pontuacao = normPontuacao(b.pontuacao);
+        const viv = pontuacao.find((p) => /vivino/i.test(String(p.fonte)) && Number(p.escala) === 5);
+        const precoMercado = precoMedioDeFaixa(b.faixaMercado);
+        const castas = castasDaLista(b.castas);
+        const conhecido: Record<string, unknown> = {
+          nota: viv ? viv.valor : null,
+          notaUrl: viv && typeof viv.url === "string" && /vivino\.com/i.test(viv.url as string) ? viv.url : null,
+          notaAno: viv ? v.ano : null,
+          pontuacao,
+          precoMercado,
+          castas,
+          regiao: b.regiao ? s(b.regiao, 60) : v.regiao,
+          tipo: TIPOS.includes(b.tipo) ? b.tipo : v.tipo,
+          estilo: null,
+          harmonizacao: b.harmonizacao ? s(b.harmonizacao, 240) : null,
+          notasProva: null,
+          produtor: v.produtor,
+          origem: "pesquisa",
+          origemEm: new Date().toISOString(),
+        };
+        const achou = pontuacao.length || precoMercado != null || castas.length || conhecido.harmonizacao;
+        novos[vinhos.indexOf(v)] = achou ? conhecido : { naoEncontrado: true, origem: "pesquisa" };
+      }
+    }
+
+    /* A carta com o que se sabe AGORA: o que já se sabia na leitura + o que
+       acabou de chegar. É sobre esta que se recomenda outra vez. */
+    const vinhosResultado = vinhos.map((v, k) => {
+      const n = novos[k] as any;
+      const conhecido = n && !n.naoEncontrado ? n : null;
+      if (conhecido) {
+        carta[v.i].conhecido = conhecido;
+        carta[v.i].precoAvaliacao = avaliarPreco(v.preco, conhecido.precoMercado);
+      }
+      return {
+        i: v.i, nome: v.nome,
+        conhecido,
+        precoAvaliacao: conhecido ? carta[v.i].precoAvaliacao : null,
+        naoEncontrado: !conhecido,
+      };
+    });
+
+    const rec = await recomendar(carta, prato, numOrNull(resultado?.orcamento, 1, 10000), model, ctrl.signal);
+    usageTotal = somarUsage(usageTotal, rec.usage);
+    if (rec.modelo) chamadas++;
+    const temConhecidos = carta.some((v) => v.conhecido);
+    const recomendacao = rec.falhou ? "falhou" : !temConhecidos ? "sem-conhecidos" : "ok";
+
+    const verificacao = {
+      // 2 = objeto (antes era só o array de resultados). A app lê as duas.
+      versao: 2,
+      vinhos: vinhosResultado,
+      sugestoes: rec.sugestoes,
+      recomendacao,
+      pesquisar: rec.pesquisar,
     };
 
-    const transitorio = (st: number) => st === 429 || st === 500 || st === 503;
-    const candidatos = await candidatosModelo(ctrl.signal);
-    if (ctrl.signal.aborted) throw new DOMException("timeout", "AbortError");
-    console.log("VERIFICAR-VINHOS candidatos:", candidatos.join(", "));
-    let g: Response | null = null;
-    let gd: any = null;
-    let texto2 = "";
-    let vazioMotivo = "";
-
-    for (let ci = 0; ci < candidatos.length && !ctrl.signal.aborted; ci++) {
-      model = candidatos[ci];
-      for (let vi = 0; vi < variantes.length && !ctrl.signal.aborted; vi++) {
-        const v = variantes[vi];
-        g = await chamarGemini(model, v);
-        console.log("VERIFICAR-VINHOS tentativa:", model, v.label, "->", g.status);
-        if (g.status === 400) continue;
-        break;
-      }
-      /* Um 200 com o corpo VAZIO não é resposta — é o modelo a gastar o
-         orçamento a pensar e a não escrever nada. Lê-se o corpo AQUI para
-         se poder passar ao modelo seguinte, e sobretudo para isto NÃO
-         fechar como uma verificação concluída sem um único resultado.
-         Ver o CLAUDE.md da WineCatalog, "O 200 vazio". */
-      if (g && g.ok) {
-        gd = await g.json();
-        const cand = gd?.candidates?.[0];
-        vazioMotivo = String(cand?.finishReason ?? "") || "resposta vazia";
-        texto2 = (cand?.content?.parts ?? []).map((p: any) => p?.text ?? "").join("").trim();
-        console.log("VERIFICAR-VINHOS resposta:", model, "finishReason:", vazioMotivo,
-                    "texto:", texto2.length, "tokens saída:", gd?.usageMetadata?.candidatesTokenCount ?? 0);
-        if (texto2) break;
-        g = null;
-        continue;
-      }
-      if (g && g.status === 404) { _models = null; continue; }
-      if (g && !transitorio(g.status)) break;
-    }
-
-    if (g && !g.ok) {
-      const status = g?.status ?? 502;
-      const detail = g ? await g.text() : "";
-      let msg = "";
-      try { msg = JSON.parse(detail)?.error?.message ?? ""; } catch (_) { /**/ }
-      await registar("erro", { passo: "gemini", status, modelo: model, erro: (msg || detail).slice(0, 800) }, quem);
-      const erroUtilizador = transitorio(status)
-        ? "o serviço está com muita procura agora — tenta outra vez"
-        : `gemini ${status} (${model})${msg ? ": " + msg.slice(0, 200) : ""}`;
-      await atualizarAnalise(analiseId, quem, { verificacao_estado: "erro", verificacao_erro: erroUtilizador });
-      return;
-    }
-
-    /* Nenhum modelo escreveu uma letra. Isto NUNCA pode fechar como
-       "concluido": uma verificação vazia lia-se como "não há nada a dizer
-       sobre estes cinco vinhos", que é o contrário do que se passou — e
-       esta função existe precisamente para não fingir que verificou. */
-    if (!texto2) {
-      await registar("erro", {
-        passo: "gemini_vazio", modelo: model, finishReason: vazioMotivo || null,
-        ...(usageMetadata(gd) ? { usageMetadata: usageMetadata(gd) } : {}),
-      }, quem);
-      await atualizarAnalise(analiseId, quem, {
-        verificacao_estado: "erro",
-        verificacao_erro: `o modelo não devolveu resposta (${vazioMotivo || "vazia"}) — tenta outra vez`,
-      });
-      return;
-    }
-
-    const usage = usageMetadata(gd);
-    const parsed: any = extrairJson(texto2);
-    const brutos = Array.isArray(parsed?.resultados) ? parsed.resultados : [];
-    const daIA = paraIA.map((v, i) => normResultadoVerif(brutos[i], v.nome));
-
-    // Volta a juntar os dois lados pela ORDEM ORIGINAL: quem escolheu cinco
-    // vinhos na lista espera-os de volta na ordem em que os escolheu, e não
-    // primeiro os que por acaso já se sabiam.
-    let ia = 0;
-    const verificacao = vinhos.map((_, i) => doCatalogo[i] ?? daIA[ia++]);
-
-    console.log("VERIFICAR-VINHOS ok:", verificacao.length, "modelo:", model,
-                "catalogo:", vinhos.length - paraIA.length);
+    console.log("VERIFICAR-VINHOS ok:", vinhos.length, "modelo:", model, "catalogo:", vinhos.length - paraIA.length,
+                "sugestoes:", rec.sugestoes.length);
     await registar("ok", {
-      modelo: model, vinhos: vinhos.length,
+      modelo: paraIA.length ? model : "catalogo", vinhos: vinhos.length,
       catalogo: vinhos.length - paraIA.length, gemini: paraIA.length,
-      ...(usage ? { usageMetadata: usage } : {}),
-      chamadas_gemini: 1,
-      custo_estimado_eur: CUSTO_VERIFICACAO_EUR,
+      pesquisa: paraIA.length > 0,
+      nao_encontrados: vinhosResultado.filter((v) => v.naoEncontrado).length,
+      // Ver o CLAUDE.md da WineCatalog: uma pesquisa com ZERO fontes pode ter
+      // sido respondida de memória. Conta-se aqui para se poder decidir com
+      // números se se recusa a escrita sem grounding.
+      ...(fontesN != null ? { fontes: fontesN } : {}),
+      recomendacao,
+      ...(rec.motivo ? { recomendacao_motivo: rec.motivo } : {}),
+      ...(rec.modelo ? { modelo_leve: rec.modelo } : {}),
+      ...(usageTotal ? { usageMetadata: usageTotal } : {}),
+      chamadas_gemini: chamadas,
+      custo_estimado_eur: Number(
+        ((paraIA.length ? CUSTO_VERIFICACAO_EUR : 0) + (rec.modelo ? CUSTO_RECOMENDACAO_EUR : 0)).toFixed(4),
+      ),
+      ms: Date.now() - t0,
     }, quem);
     await atualizarAnalise(analiseId, quem, { verificacao_estado: "concluido", verificacao });
 
     /* E o que se acabou de pesquisar vai para o catálogo — é uma pesquisa
-       Google a sério, a mais forte que aqui se produz (ver `winecatalog.forca`),
-       e é o que faz a Garrafeira não voltar a pagar por este mesmo vinho.
-       Depois de a verificação estar fechada: quem está à espera não espera
-       por isto. */
-    for (let i = 0; i < paraIA.length; i++) {
-      const r = daIA[i] as any;
-      const nota = numOrNull(r?.pontuacao?.[0]?.valor, 0, 5);
-      const escala = Number(r?.pontuacao?.[0]?.escala);
+       Google a sério, a mais forte que aqui se produz (ver
+       `winecatalog.forca`), e é o que faz a próxima carta com este vinho —
+       nesta app ou na Garrafeira — sair de graça. Depois de a verificação
+       estar fechada: quem está à espera não espera por isto.
+       Só o que é do VINHO: nunca o preço desta carta nem o "barato/caro". */
+    for (const v of paraIA) {
+      const k = novos[vinhos.indexOf(v)] as any;
+      if (!k || k.naoEncontrado) continue;
       const ficha: Record<string, unknown> = {};
-      // Só a do Vivino e só na escala de 5 — uma nota de 92/100 não é a
-      // mesma coisa e não se converte dividindo por 20.
-      if (nota != null && escala === 5 && /vivino/i.test(String(r?.pontuacao?.[0]?.fonte || ""))) {
-        ficha.vivino_nota = nota;
-        const u = r?.pontuacao?.[0]?.url;
-        if (typeof u === "string" && /vivino\.com/i.test(u)) ficha.vivino_url = u.slice(0, 300);
-      }
-      const pm = precoMedioDeFaixa(r?.precoAvaliacao?.faixaMercado);
-      if (pm != null) ficha.preco_medio = pm;
-      if (paraIA[i].regiao) ficha.regiao = s(paraIA[i].regiao, 60);
-      await catalogoJuntar(paraIA[i].nome, anoDoNome(paraIA[i].nome), ficha, ctrl.signal);
+      if (k.nota != null) ficha.vivino_nota = k.nota;
+      if (k.notaUrl) ficha.vivino_url = k.notaUrl;
+      if (k.precoMercado != null) ficha.preco_medio = k.precoMercado;
+      if (Array.isArray(k.castas) && k.castas.length) ficha.castas = k.castas;
+      if (k.regiao) ficha.regiao = k.regiao;
+      if (TIPOS_PARTILHADOS.includes(String(k.tipo))) ficha.tipo = k.tipo;
+      if (k.harmonizacao) ficha.harmonizacao = k.harmonizacao;
+      await catalogoJuntar(v.nome, v.produtor, v.ano, ficha, ctrl.signal);
     }
   } catch (e) {
     const err = e as Error;
     const timeout = err.name === "AbortError";
-    await registar("erro", { passo: timeout ? "timeout" : "excecao", erro: String(err.message).slice(0, 500) }, quem);
+    await registar("erro", { passo: timeout ? "timeout" : "excecao", erro: String(err.message).slice(0, 500), ms: Date.now() - t0 }, quem);
     await atualizarAnalise(analiseId, quem, {
       verificacao_estado: "erro",
       verificacao_erro: timeout
@@ -729,26 +1016,11 @@ Deno.serve(async (req) => {
       return json({ error: "não autorizado" }, 403);
     }
 
-    const { analiseId, vinhos } = await req.json().catch(() => ({}) as any);
+    const { analiseId, indices, vinhos } = await req.json().catch(() => ({}) as any);
     const id = typeof analiseId === "number" ? analiseId : parseInt(String(analiseId), 10);
     if (!Number.isFinite(id)) {
       await registar("erro", { passo: "analiseId" }, quem);
       return json({ error: "análise inválida" }, 400);
-    }
-    if (!Array.isArray(vinhos) || vinhos.length === 0 || vinhos.length > MAX_VINHOS) {
-      await registar("erro", { passo: "vinhos", count: Array.isArray(vinhos) ? vinhos.length : null }, quem);
-      return json({ error: `escolhe entre 1 e ${MAX_VINHOS} vinhos` }, 400);
-    }
-    const limpos: VinhoPedido[] = vinhos.slice(0, MAX_VINHOS)
-      .map((v: any) => ({
-        nome: s(v?.nome, 100),
-        regiao: v?.regiao ? s(v.regiao, 60) : null,
-        preco: numOrNull(v?.preco, 0, 5000),
-      }))
-      .filter((v: VinhoPedido) => v.nome);
-    if (!limpos.length) {
-      await registar("erro", { passo: "vinhos_vazios" }, quem);
-      return json({ error: "vinhos inválidos" }, 400);
     }
 
     const dona = await buscarAnaliseDoDono(authHeader, id, ctrl.signal);
@@ -757,11 +1029,27 @@ Deno.serve(async (req) => {
       return json({ error: "análise não encontrada" }, 404);
     }
 
+    /* Os vinhos vão pelo ÍNDICE na carta lida (`indices`). Uma app antiga
+       ainda em cache manda `vinhos:[{nome}]` — casa-se pelo nome, para
+       ninguém ficar com o botão partido entre dois deploys. */
+    const carta: any[] = dona.resultado.vinhosCarta;
+    let pedidos: number[] = [];
+    if (Array.isArray(indices)) {
+      pedidos = indices.map((x: unknown) => Number(x));
+    } else if (Array.isArray(vinhos)) {
+      pedidos = vinhos.map((v: any) => carta.findIndex((c) => c?.nome === v?.nome));
+    }
+    pedidos = [...new Set(pedidos.filter((i) => Number.isInteger(i) && i >= 0 && i < carta.length))];
+    if (pedidos.length === 0 || pedidos.length > MAX_VINHOS) {
+      await registar("erro", { passo: "vinhos", count: pedidos.length }, quem);
+      return json({ error: `escolhe entre 1 e ${MAX_VINHOS} vinhos` }, 400);
+    }
+
     await atualizarAnalise(id, quem!, { verificacao_estado: "pendente", verificacao: null, verificacao_erro: null });
 
     // NÃO faz await — mesma razão da sugerir-vinho.ts: a pesquisa Google
     // pode demorar, e isto sobrevive ao pedido original terminar.
-    EdgeRuntime.waitUntil(processarVerificacao(limpos, quem!, id));
+    EdgeRuntime.waitUntil(processarVerificacao(pedidos, dona.resultado, dona.prato, quem!, id));
 
     return json({ estado: "pendente" }, 202);
   } catch (e) {

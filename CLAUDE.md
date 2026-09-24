@@ -22,20 +22,64 @@ isolado: `wineselection`.
   Supabase). Fonte de verdade do schema `wineselection`.
 - `sugerir-vinho.ts` — Edge Function (Deno), na raiz do repo, deploy à parte
   com `supabase functions deploy sugerir-vinho` (ou via MCP do Supabase).
-- `verificar-vinhos.ts` — Edge Function irmã, verificação a sério (pesquisa
-  Google real) para até 5 vinhos escolhidos à mão na lista completa da
-  carta. Ver "A Edge Function `verificar-vinhos`" abaixo.
+- `verificar-vinhos.ts` — Edge Function irmã, a única pesquisa paga
+  (Google real) para até 4 vinhos que o catálogo não conhece, escolhidos à
+  mão na lista da carta; grava o que encontra no catálogo e volta a
+  recomendar. Ver "A Edge Function `verificar-vinhos`" abaixo.
 - `apple-touch-icon.png` / `icon-512.png` — gerados por um script Node
   descartável (encoder PNG à mão, sem dependências); não há fonte vetorial
   guardada no repo. Para os refazer/alterar, escreve outro script assim.
 
 ## O que a app faz, em duas frases
 Upload/foto da carta → a Edge Function `sugerir-vinho` lê a imagem com o
-Gemini, cruza com pesquisa Google (Vivino e afins) para pontuação e preço de
-mercado, e devolve JSON estruturado com 1–3 sugestões (priorizando vinhos
-portugueses) + todos os vinhos lidos na carta. A app guarda cada resultado em
-`wineselection.analises` (histórico) — **nunca guarda a imagem em si**, só o
-JSON devolvido e o prato indicado.
+Gemini (só visão, **sem** pesquisa), pergunta ao catálogo partilhado o que já
+se sabe de cada vinho, e recomenda 0–3 **só entre os que se conhecem**
+(priorizando vinhos portugueses). Os outros aparecem como "sem dados", e
+quem quiser escolhe até 4 para a `verificar-vinhos` pesquisar a sério — o
+que ela encontra fica no catálogo e a recomendação refaz-se. A app guarda
+cada resultado em `wineselection.analises` (histórico) — **nunca guarda a
+imagem em si**, só o JSON devolvido e o prato indicado.
+
+## Ou sabemos ou não sabemos (setembro de 2026) — a regra que manda no resto
+Até aqui a análise era UMA passagem cara e a adivinhar: ler a carta +
+pesquisa Google + escolher, tudo junto, e a seguir uma segunda chamada a
+estimar de memória a nota dos ~40 vinhos da carta (`pontuacaoAprox`, o "~"
+cinzento). O til era honesto, mas o número estava lá, e era o que se lia à
+mesa. **A estimativa acabou.** Agora são três passos e nenhum inventa uma
+nota:
+1. **Ler** (`sugerir-vinho`): visão com `response_mime_type:json` e
+   `thinkingBudget:0` — sem pesquisa não há o conflito do 400. Pede também
+   **produtor e ano**, que é com o que o catálogo acerta.
+2. **O catálogo responde** (`procurar_lote`, uma ida só): nota, preço de
+   loja, castas, harmonização. O "barato/justo/caro" é sempre uma CONTA em
+   código (`avaliarPreco`, preço da carta ÷ preço de loja), nunca a opinião
+   do modelo.
+3. **Recomendar** (`recomendar`): uma chamada só de texto, no `flash-lite`,
+   que escolhe POR ÍNDICE e só entre os CONHECIDOS — um índice que aponte
+   para um desconhecido ou para fora da carta é deitado fora em código. O
+   modelo devolve só a ordem e a frase da harmonização; a nota, o preço e a
+   classificação do cartão montam-se a partir dos dados. A mesma chamada
+   aponta até 4 desconhecidos que valia a pena pesquisar (`pesquisar`) —
+   a app só os PRÉ-SELECCIONA, nunca os mostra como facto.
+
+A pesquisa paga passou a acontecer só quando alguém a pede, só para os
+vinhos que escolheu, e só UMA vez por vinho em todo o projeto: a
+`verificar-vinhos` grava no catálogo, e a próxima carta com aquele vinho —
+aqui ou na Garrafeira — sai de graça.
+
+**Porque não um OCR no browser (Tesseract.js) em vez do Gemini a ler a
+foto:** foi a primeira pergunta, e a resposta foi que ler a imagem nunca
+foi o que custava — sem pesquisa, a leitura é uma fração de cêntimo. Um OCR
+local descarrega vários MB para o telemóvel à mesa, é lento, erra com cartas
+a duas colunas e letra decorativa, e devolve LINHAS, não
+`{nome, produtor, ano, preço}`. Se os números um dia disserem o contrário,
+entra como primeira tentativa com o Gemini como rede.
+
+**`recomendar`, `avaliarPreco` e `conhecimentoDoCatalogo` estão duplicadas
+nas duas Edge Functions** (cada uma é auto-contida, como tudo neste
+projeto): a `verificar-vinhos` volta a recomendar depois de pesquisar. Se
+mexeres no prompt, nas regras ou nos cortes de preço de uma, mexe na outra
+no MESMO dia.
 
 ## Login e permissões (mesmo padrão do Goals/FestasBV)
 - `SB_URL`/`SB_KEY` são os do projeto partilhado; `Accept-Profile`/
@@ -64,16 +108,11 @@ dígitos). Em Definições, o admin gera uma password
 telefone, a pessoa troca-a em Definições. Ver `db/admin_pass_temp.sql`.
 
 ## A Edge Function `sugerir-vinho`
-Junta duas técnicas já usadas noutras apps do mesmo projeto:
 - **Imagem inline** (`inline_data` no `parts`), como a `fatura-restaurante`
-  do SplitBill.
-- **Grounding com pesquisa Google** (`tools:[{google_search:{}}]`), como a
-  `calendario-sporting` do Goals — sem isto o modelo inventaria pontuações e
-  preços de memória, desactualizados.
-- Como as duas juntas: a API recusa `response_mime_type: json` quando o tool
-  de pesquisa está ligado, por isso o JSON vem em texto dentro da resposta e
-  é extraído com `extrairJson` (varredura de chavetas equilibradas — mesma
-  função copiada da `calendario-sporting`).
+  do SplitBill — e desde setembro de 2026 **sem** pesquisa Google (ver "Ou
+  sabemos ou não sabemos"). Sem o tool de pesquisa a API aceita
+  `response_mime_type: json`; o `extrairJson` fica como rede para um modelo
+  que embrulhe a resposta.
 - **Descoberta de modelo com fallback** (mesma estratégia das três funções
   irmãs): pergunta-se à API que "flash" a chave tem disponíveis, tenta-se
   por ordem, com retry em erros transitórios (429/500/503) e um 400 (nome de
@@ -86,26 +125,26 @@ Junta duas técnicas já usadas noutras apps do mesmo projeto:
   que o ponteiro desse 429.
 - **`thinkingBudget:0` NUNCA com o tool `google_search`.** A API recusa as
   duas juntas com 400 ("Request contains an invalid argument"): a pesquisa
-  precisa de pensar para decidir o que pesquisar. Era a PRIMEIRA variante
-  tentada nas duas funções — não partia nada (o loop caía na seguinte), só
-  deitava fora uma ida ao Gemini em cada análise e em cada verificação, sem
-  nada no ecrã a dizê-lo. Na `sugerir-vinho` a trave é o `&& !v.search` no
-  `chamarGemini`; na `verificar-vinhos`, onde a pesquisa está sempre
-  ligada, a variante deixou simplesmente de existir.
-- **Duas chamadas, DOIS modelos.** A pesada (fotos + grounding) precisa do
-  `flash`; a leve (`pedirPontuacoesAprox`, só uma lista de nomes a pedir um
-  número de 0 a 5) corre no `MODELO_LEVE` — o `flash-lite`, que é o que a
-  Garrafeira usa como primeira escolha em tudo. Se o lite falhar repete-se
-  no modelo que já respondeu: trocar de modelo não pode ser um caminho novo
-  para ficar sem pontuações nenhumas.
+  precisa de pensar para decidir o que pesquisar. Na `sugerir-vinho` já não
+  há pesquisa, e o `thinkingBudget:0` é a primeira variante (transcrever
+  não precisa de pensar, e pensar era o que dava o "200 vazio"); na
+  `verificar-vinhos`, onde a pesquisa está sempre ligada, a variante não
+  existe — e a `recomendar` que lá corre depois é outra chamada, sem tool.
+- **Duas chamadas, DOIS modelos.** A leitura das fotos precisa do `flash`;
+  a recomendação (`recomendar`, só texto e factos já arrumados) corre no
+  `MODELO_LEVE` — o `flash-lite`. Se o lite falhar repete-se no modelo que
+  já respondeu. Se falharem os dois, a análise fecha na mesma com a lista
+  e `recomendacao:'falhou'` — a app di-lo, em vez de fingir que não havia
+  nada a recomendar.
 - **Cada análise regista o que gastou** (`usageMetadata` somado das duas
-  chamadas, `chamadas_gemini`, `custo_estimado_eur`) no `sync_log`, como já
-  fazia a Garrafeira. Os TOKENS são facto — vêm da API; o EURO é uma
-  estimativa grosseira (`CUSTO_ANALISE_EUR`/`CUSTO_LEVE_EUR`), não um preço
-  publicado, e a pesquisa Google é faturada à parte por pedido. Sem isto
-  não havia como responder à pergunta que o catálogo partilhado veio pôr:
-  está a poupar quanto? Uma verificação servida só pelo catálogo regista
-  `custo_estimado_eur: 0` — é esse o número que interessa ver a crescer.
+  chamadas, `chamadas_gemini`, `custo_estimado_eur`, e
+  `catalogo_conhecidos` — quantos vinhos da carta o catálogo já conhecia,
+  que é o número que devia subir com o tempo) no `sync_log`. Os TOKENS são
+  facto — vêm da API; o EURO é uma estimativa grosseira
+  (`CUSTO_LEITURA_EUR`/`CUSTO_RECOMENDACAO_EUR`/`CUSTO_VERIFICACAO_EUR`),
+  não um preço publicado, e a pesquisa Google é faturada à parte por
+  pedido. Uma pesquisa servida só pelo catálogo regista a parte da
+  pesquisa a 0.
 - **Autorização**: verifica o JWT (`verify_jwt` ligado no deploy) e depois
   confirma que o email consta de `wineselection.allowed_users` — qualquer
   utilizador aprovado pode chamar (ao contrário da `calendario-sporting`,
@@ -121,19 +160,11 @@ Junta duas técnicas já usadas noutras apps do mesmo projeto:
 - Secrets: usa o `GEMINI_API_KEY` **já existente no projecto** (partilhado
   com as outras funções — secrets de Edge Function são por projecto, não por
   função). Não precisa de nenhum secret novo.
-- **Duas chamadas ao Gemini, não uma**: a pesada (imagens + pesquisa) só
-  devolve `sugestoes` e `vinhosCarta` sem pontuação aproximada.
-  `pontuacaoAprox` de cada vinho da carta vem de uma SEGUNDA chamada,
-  `pedirPontuacoesAprox`, só texto (os nomes já lidos), sem imagens nem
-  pesquisa, com o seu próprio limite de 15s. Pedir as duas coisas na mesma
-  chamada (imagens + pesquisa + estimar ~20-40 vinhos um a um) esgotava
-  sempre o tempo disponível, mesmo com `thinkingBudget:0`. Se a segunda
-  chamada falhar, a análise principal segue à mesma, só sem `pontuacaoAprox`
-  (fica `null`) — nunca deita tudo abaixo por isto.
 - **Trabalho assíncrono (`EdgeRuntime.waitUntil`)** — a parte mais
-  importante do desenho: a análise (imagens + pesquisa Google) pode
-  legitimamente passar de um minuto (confirmado nos logs — é o próprio
-  Gemini, não um bug). Um único pedido HTTP à espera desse tempo todo morre
+  importante do desenho: a análise podia legitimamente passar de um minuto
+  quando levava a pesquisa Google (confirmado nos logs — era o próprio
+  Gemini, não um bug); sem ela é mais rápida, mas continua a ser a leitura
+  de até 6 fotos. Um único pedido HTTP à espera desse tempo todo morre
   sempre que o telemóvel bloqueia o ecrã ou o browser troca de app — era
   isso que causava tanto o erro de "demasiado tempo" como o "erro de
   ligação" ao voltar à app. A função por isso:
@@ -151,80 +182,60 @@ Junta duas técnicas já usadas noutras apps do mesmo projeto:
   `user_email=eq.<quem>`, mesmo a service role tendo acesso a tudo, para só
   poder mexer na linha do próprio dono.
 
-## Coerência: a sugestão bate certo com a carta?
-O modelo lê a carta E escolhe o vinho na mesma passagem — nada garante que o
-vinho recomendado seja um dos que ele próprio transcreveu para `vinhosCarta`,
-nem que o `precoCarta` anunciado seja o preço impresso. É a falha que custa
-mais caro a quem está à mesa (pedir um vinho que não existe, ou contar com
-24€ e ver 38€ na conta) e é a única que se confirma **sem gastar mais uma
-chamada ao Gemini**: `verificarCoerencia` (em `sugerir-vinho.ts`) confronta
-as duas metades da resposta uma com a outra, em código, e anota cada
-sugestão com `coerencia:{naCarta,precoCartaLido}`.
-- Emparelhamento por nome normalizado (sem acentos nem colheita, com
-  `qta.`→`quinta`), por contenção de tokens — "Crasto" casa com "Quinta do
-  Crasto Reserva", de propósito. Palavras genéricas (`quinta`, `herdade`,
-  `reserva`, …) não chegam sozinhas para casar, senão "Quinta do Crasto"
-  casava com "Quinta da Romaneira". Tipos conhecidos e diferentes nunca
-  casam (o Papa Figos branco não é o tinto).
-- Empate (a gama base E a Reserva do mesmo produtor na carta) desempata-se
-  pelo preço; se nem o preço desempatar fica `ambiguo` e daí não se aproveita
-  preço nenhum.
-- **Nunca se apaga uma sugestão por falhar isto** — o emparelhamento é
-  aproximado e um falso negativo a esconder o melhor vinho da carta seria
-  pior do que o aviso. Marca-se, e a app mostra um aviso no cartão
-  (`wsCoerenciaHTML`); quem está à mesa tem o menu na mão para confirmar.
-- `naCarta:null` significa "não havia carta contra que verificar", que não é
-  o mesmo que "não está lá".
-- Bónus: se a sugestão vier sem `precoCarta` mas o vinho for encontrado na
-  carta com preço, o preço é preenchido — mas só com emparelhamento forte
-  (≥0.9) e sem ambiguidade.
-- As contas de cada análise ficam no `sync_log`
-  (`coerencia_sem_carta`/`coerencia_preco_errado`/`coerencia_preco_preenchido`)
-  — é por aí que se vê se isto é um problema frequente ou raro.
+## Coerência: a sugestão bate certo com a carta? (resolvida pelo desenho)
+Enquanto o modelo lia a carta E escolhia o vinho na mesma passagem, nada
+garantia que o recomendado fosse um dos que ele próprio tinha transcrito,
+nem que o `precoCarta` fosse o impresso — e existia uma
+`verificarCoerencia` a confrontar as duas metades em código. **Desde a
+versão 2 isto já não pode acontecer**: a recomendação escolhe POR ÍNDICE
+dentro de `vinhosCarta`, e o nome e o preço do cartão são os da própria
+linha lida. A função saiu. `wsCoerenciaHTML` fica na app só para desenhar os
+avisos dos resultados antigos do histórico.
 
 ## A Edge Function `verificar-vinhos`
-Nasceu de uma limitação conhecida: `vinhosCarta[].pontuacaoAprox` (todos os
-vinhos da carta, não só as sugestões) é uma estimativa de memória do
-Gemini, sem pesquisa — pedir pesquisa real para os ~40 vinhos todos foi o
-que causava os timeouts que levaram a separar essa estimativa numa 2ª
-chamada leve (ver acima). Em vez de resolver isso "à bruta", esta função dá
-ao utilizador a opção de pagar o custo da pesquisa real só para os vinhos
-que ele escolher à mão na lista (até 5) — o resto da carta continua a usar
-só a estimativa aproximada.
-- **O catálogo partilhado responde primeiro** (ver a secção própria): os
-  vinhos que já lá estão COMPLETOS (nota pesquisada **e** preço de mercado)
-  saem sem Gemini nenhum. Exige-se as duas coisas de propósito — meia
-  resposta era pior do que pesquisar, que quem escolheu estes cinco vinhos
-  à mão escolheu-os porque quer saber. Continua a ser verificação a sério:
-  o que está no catálogo foi lá posto por uma pesquisa a sério, e a
-  `winecatalog.forca()` não deixa entrar estimativas de memória. O resultado
-  traz `origem:'catalogo'` e a data, e a app diz-o.
+É a ÚNICA pesquisa paga desta app: até **4** vinhos que o catálogo ainda
+não conhece (ou conhece sem nota e preço), escolhidos à mão na lista — a
+app pré-selecciona os que a recomendação apontou em `pesquisar`.
+- **O catálogo responde primeiro**: alguém pode tê-los pesquisado entretanto
+  (aqui, na Garrafeira, na WineCatalog). Os que já lá estão COMPLETOS (nota
+  **e** preço de mercado) saem sem Gemini nenhum.
+- A pesquisa pede mais do que nota e preço: **castas, região, cor e
+  harmonização** — é o que a recomendação precisa para escolher com
+  fundamento, e o que faz o catálogo servir a próxima carta. O
+  "barato/justo/caro" é a mesma conta em código da `sugerir-vinho`
+  (`avaliarPreco`); a opinião do modelo sobre o preço já não chega ao ecrã.
+- Um vinho que a pesquisa não conseguiu confirmar volta como
+  `naoEncontrado` e a app diz "não encontrado" — não é o mesmo que "sem
+  dados" (ninguém procurou) e não se volta a oferecer para pesquisa.
+- Depois de pesquisar, **volta a RECOMENDAR sobre a carta inteira** (a
+  mesma `recomendar`, duplicada): o que já se sabia na leitura mais o que
+  acabou de chegar.
+- **Grava no catálogo** (`juntar`, origem `ws-verificacao`, força 3) com o
+  nome, o PRODUTOR (só o que a carta dizia — um produtor achado pela
+  pesquisa não mexe na identidade) e o ano. Só o que é do VINHO: nunca o
+  preço da carta nem o "barato/caro".
+- Conta as fontes do grounding (`fontes: N` no log). Ver o `CLAUDE.md` da
+  WineCatalog: se isto andar a zero, o passo seguinte é recusar a escrita
+  sem grounding.
 - Mesma arquitetura assíncrona da `sugerir-vinho` (`EdgeRuntime.waitUntil` +
-  polling), mas mexe na MESMA linha de `wineselection.analises` — só em
-  três colunas à parte: `verificacao_estado`/`verificacao`/
-  `verificacao_erro`. Nunca toca em `estado`/`resultado`. A análise já tem
-  de estar `'concluido'` (confirmado com o JWT do próprio utilizador, a RLS
-  de `analises_sel` é que garante que só vê a sua).
-- Só texto + pesquisa Google, sem imagens — mais leve que a análise
-  principal, mas continua a usar `EdgeRuntime.waitUntil` porque a pesquisa
-  em si é imprevisível.
-- **Sem fallback "sem pesquisa"** (ao contrário da `sugerir-vinho`) — se
-  todos os modelos falharem com pesquisa ligada, a função devolve erro em
-  vez de responder com uma estimativa de memória disfarçada de
-  "verificação a sério". É a única razão de a função existir; fingir que
-  verificou sem pesquisar seria pior do que não ter esta funcionalidade.
-- Duplica (não importa) a descoberta de modelo/normalizadores da
-  `sugerir-vinho.ts` — mesma convenção das outras Edge Functions
-  irmãs deste projeto (cada uma auto-contida).
+  polling), na MESMA linha de `wineselection.analises` — só nas colunas
+  `verificacao_estado`/`verificacao`/`verificacao_erro`. Nunca toca em
+  `estado`/`resultado`. A análise já tem de estar `'concluido'` (confirmado
+  com o JWT do próprio utilizador).
+- **Sem fallback "sem pesquisa"** — se todos os modelos falharem com
+  pesquisa ligada, a função devolve erro em vez de responder com uma
+  estimativa de memória disfarçada de "pesquisa a sério". É a única razão
+  de a função existir.
 
 Pedido: `POST /functions/v1/verificar-vinhos` com
-`{analiseId, vinhos:[{nome,regiao,preco}]}` (1 a 5 vinhos, tirados de
-`resultado.vinhosCarta` da análise já concluída). Resposta também é só
-`{estado:'pendente'}` (202) — `app.js` (`wsVerificar`/`wsVerifPollTick`)
-sonda a mesma linha de `analises` até `verificacao_estado` mudar para
-`'concluido'` (lê `verificacao`, um array `[{nome,pontuacao,precoAvaliacao}]`
-na MESMA forma de `sugestoes[].pontuacao`/`precoAvaliacao`) ou `'erro'`
-(lê `verificacao_erro`).
+`{analiseId, indices:[i,…]}` (1 a 4 índices em `resultado.vinhosCarta`).
+Uma app antiga em cache ainda manda `vinhos:[{nome}]` — casa-se pelo nome.
+Resposta: `{estado:'pendente'}` (202); `app.js` (`wsVerificar`/
+`wsVerifPollTick`) sonda até `verificacao_estado` mudar. `verificacao` é
+`{versao:2, vinhos:[{i,nome,conhecido,precoAvaliacao,naoEncontrado}],
+sugestoes, recomendacao, pesquisar}`; a app junta-a ao `resultado`
+(`wsMesclar`) e redesenha. As antigas eram só um array
+`[{nome,pontuacao,precoAvaliacao}]` e o histórico ainda as desenha.
 
 ## O catálogo partilhado com a Garrafeira (não pagar duas vezes o mesmo)
 Há uma segunda app de vinhos no mesmo projeto Supabase — a **Garrafeira** —
@@ -244,19 +255,22 @@ nomes das funções e as respostas são os mesmos.
 
 Onde é que isto entra nesta app, e o que muda:
 
-- **`sugerir-vinho`** — a `pontuacaoAprox` de toda a carta era sempre uma
-  SEGUNDA chamada ao Gemini, a estimar ~40 vinhos de memória. Agora
-  pergunta-se primeiro ao catálogo (`winecatalog.procurar_lote`, **uma** ida ao
-  PostgREST para a carta toda): os vinhos que alguém já pesquisou a sério
-  respondem já, e ao Gemini vão só os que sobram. Quando não sobra nenhum,
-  essa chamada não acontece.
-- **`verificar-vinhos`** — a mais cara das três (pesquisa Google a sério).
-  Os vinhos que o catálogo já tem COMPLETOS respondem sem Gemini nenhum.
-- as duas **escrevem** o que descobrem, no fim e depois de a linha de
-  `analises` estar fechada: quem está à espera não espera pelo catálogo, e
-  se ele falhar não estraga nada. **Nada disto pode deitar uma análise
-  abaixo** — é uma poupança, não uma dependência, e daí os `try/catch` a
-  engolir tudo.
+- **`sugerir-vinho`** — o catálogo é a PRIMEIRA fonte de verdade de cada
+  vinho da carta (`winecatalog.procurar_lote`, **uma** ida ao PostgREST para
+  a carta toda, com nome, produtor e ano). O que ele não sabe fica "sem
+  dados" — já não há estimativa de memória a tapar o buraco. Esta função
+  **não escreve** no catálogo: o que lê de uma carta não foi confirmado por
+  ninguém. Janela de 180 dias para os campos voláteis (era 30 quando a
+  estimativa tapava os buracos; sem ela, uma nota de há quatro meses é
+  conhecimento, e a alternativa é "sem dados").
+- **`verificar-vinhos`** — a única pesquisa paga. Os vinhos que o catálogo
+  já tem COMPLETOS respondem sem Gemini nenhum; o que pesquisa (nota,
+  preço, castas, região, cor, harmonização) **escreve-o** no catálogo, no
+  fim e depois de a linha de `analises` estar fechada: quem está à espera
+  não espera pelo catálogo, e se ele falhar não estraga nada.
+- **Nada disto pode deitar uma análise abaixo** — é uma poupança, não uma
+  dependência, e daí os `try/catch` a engolir tudo. Se o catálogo não
+  responder, a carta aparece toda "sem dados", que é verdade.
 
 **A `pontuacaoAprox` NUNCA entra no catálogo.** É a regra que segura o
 resto. Ela é uma estimativa de memória, sem pesquisa, e esta app inteira
@@ -264,8 +278,8 @@ está construída à volta de não a disfarçar de verificação — deixá-la e
 aqui era pior do que isso: era espalhá-la pelas duas apps com ar de facto
 pesquisado, e depois já ninguém sabia de onde tinha vindo. A
 `winecatalog.forca()` do lado do SQL recusa-a mesmo que um dia alguém tente
-mandá-la. Só `sugestoes[].pontuacao` (que vem com pesquisa e fonte) e a
-`verificar-vinhos` é que escrevem.
+mandá-la. Desde setembro de 2026 ela nem sequer existe; só a
+`verificar-vinhos` (pesquisa a sério) é que escreve.
 
 **E uma nota escrita à mão numa garrafeira também não vale o que vale a
 `verificar-vinhos`.** A Garrafeira deixa cada um escrever o que quiser nos
@@ -284,14 +298,14 @@ WineCatalog.
 **O "barato/justo/caro" também não entra, e por outra razão:** não é do
 vinho, é de uma CARTA. O mesmo Papa Figos é barato a 22 € e caro a 45 €, e
 nem o vinho mudou. O que atravessa é o preço de MERCADO (`preco_medio`), e a
-comparação com a carta refaz-se sempre em código — `avaliarPreco` em
-`verificar-vinhos.ts`, com os cortes escritos à vista (2 a 3 vezes o preço
+comparação com a carta refaz-se sempre em código — `avaliarPreco`, nas duas
+Edge Functions (duplicada), com os cortes escritos à vista (2 a 3 vezes o preço
 de loja é o normal num restaurante) e a conta no próprio comentário que vai
 para o ecrã. É mais honesto do que a opinião do modelo: quem está à mesa vê
 a conta e discorda dela se quiser.
 
 **A chave (o que faz dois vinhos serem o mesmo vinho) vive só no SQL.**
-Daqui vai o nome e o ano em cru. Chegou a estar repetida em TypeScript nas
+Daqui vão o nome, o produtor (só quando a carta o escreve) e o ano em cru. Chegou a estar repetida em TypeScript nas
 três Edge Functions com um aviso a dizer para as manter iguais — e um aviso
 desses é uma dívida à espera: no dia em que uma divergisse, o catálogo
 partia-se em dois em silêncio e a única coisa que se notava era a conta a
@@ -302,12 +316,13 @@ resposta é a nota DAQUELA colheita; sem ele, é a de uma recente e o
 catálogo diz qual — a app mostra-o (`.carta-ano`), que sem isso era dar uma
 nota sem se saber de que garrafa é.
 
-**Na UI, uma nota pesquisada e um palpite não podem parecer a mesma coisa**
-(`pontuacaoOrigem`, `wsScoreTxt`, `wsNotaDaLista`): a do catálogo fica
-dourada e com a colheita ao lado, a estimativa fica cinzenta e com um `~` à
-frente. E uma verificação que volta num instante ganha uma linha a dizer
-porquê (`wsVerifOrigemHTML`) — sem ela parece uma resposta a fingir, e não
-é: já tinha sido paga.
+**Na UI, ou sabemos ou não sabemos** (`wsCartaItemV2HTML`): uma nota com
+fonte fica dourada e com a colheita ao lado; um vinho sem dados diz "sem
+dados" — nunca um número. O preço da carta ganha a cor do
+"barato/justo/caro" (a conta). E cada sugestão diz de onde vieram os
+factos (`wsSugOrigemHTML`: "do catálogo — não foi preciso pesquisar" ou
+"pesquisado agora — ficou guardado") — sem isso uma resposta instantânea
+parece a fingir, e não é: já tinha sido paga.
 
 ## As lições da Garrafeira têm de atravessar para cá
 As duas apps falam com a MESMA API, com a MESMA chave, e cada Edge Function
@@ -353,31 +368,33 @@ visível (`visibilitychange`) e mesmo depois de recarregar a página
 (`wsRetomarPendente`, chamado em `sbAposLogin`, via o `id` guardado em
 `localStorage['ws_pendente_id']`).
 
-A forma de `resultado` (a coluna jsonb, dentro da linha de `analises`):
+A forma de `resultado` (a coluna jsonb, dentro da linha de `analises`),
+**versão 2**:
 ```
-{ prato, orcamento, sugestoes:[{nome,tipo,regiao,casta,precoCarta,
-    pontuacao:[{fonte,valor,escala,url}],
+{ versao:2, prato, orcamento,
+  recomendacao:'ok'|'sem-conhecidos'|'falhou'|'sem-carta',
+  sugestoes:[{i,nome,produtor,tipo,regiao,casta,precoCarta,
+    pontuacao:[{fonte,valor,escala,url}], notaAno,
     precoAvaliacao:{classificacao,faixaMercado,comentario}, combinacao,
-    coerencia:{naCarta,precoCartaLido}}],
-  vinhosCarta:[{nome,tipo,regiao,preco,pontuacaoAprox,
-    pontuacaoOrigem,pontuacaoAno,pontuacaoUrl}], aviso,
-  fontes:[{titulo,url}], pesquisa, modelo, geradoEm }
+    origem:'catalogo'|'pesquisa'}],
+  pesquisar:[i,…],
+  vinhosCarta:[{nome,produtor,ano,tipo,regiao,preco,
+    conhecido:null|{nota,notaUrl,notaAno,pontuacao,precoMercado,castas,
+      regiao,tipo,estilo,harmonizacao,notasProva,produtor,origem,origemEm},
+    precoAvaliacao}],
+  aviso, pesquisa:false, modelo, geradoEm }
 ```
-`sugestoes[].pontuacao` é sempre confirmada por pesquisa Google (fonte real,
-com URL) — é o que sustenta a avaliação de preço. Já
-`vinhosCarta[].pontuacaoAprox` tem DUAS origens possíveis, e é o
-`pontuacaoOrigem` que diz qual: `'catalogo'` é uma nota pesquisada a sério
-que já existia (ver o catálogo partilhado, acima) e vem com `pontuacaoAno`
-(a colheita a que pertence) e `pontuacaoUrl`; `'estimativa'` é o palpite
-geral do modelo, de memória, sem pesquisa vinho a vinho — de propósito mais
-leve, para não voltar a estourar o tempo de resposta com cartas grandes. Um
-resultado antigo, de antes disto, não tem `pontuacaoOrigem` — e a app trata
-a ausência como estimativa, que é o que era. Se mexeres neste contrato, mexe em três
-sítios (`sugerir-vinho.ts`, `wsResultadoHTML`/`wsVinhoCardHTML` em `app.js`,
-e o `resultado jsonb` de `db/schema.sql`).
+`conhecido:null` quer dizer **não se sabe** — nunca "é fraco". Cada nota e
+cada preço de `sugestoes` vêm de `conhecido` (catálogo ou pesquisa), nunca
+do texto do modelo; `sugestoes[].i` é o índice em `vinhosCarta`.
 
-`sugestoes[].coerencia` não vem do Gemini — é calculada em código pela
-própria função (`verificarCoerencia`), ver abaixo.
+Um resultado **antigo** (sem `versao`) tem `vinhosCarta[].pontuacaoAprox`/
+`pontuacaoOrigem` e `sugestoes[].coerencia`. A app desenha-o pelo caminho
+antigo (`wsResultadoLegadoHTML`), mas a estimativa (`pontuacaoOrigem`
+`'estimativa'`, ou sem origem) aparece como "—": ou sabemos ou não sabemos.
+Se mexeres neste contrato, mexe em três sítios (`sugerir-vinho.ts` +
+`verificar-vinhos.ts`, `wsResultadoV2HTML`/`wsMesclar` em `app.js`, e o
+comentário do `resultado jsonb` em `db/schema.sql`).
 
 ## O registo central de acessos ao Gemini (schema `ia_uso`)
 São **seis** apps neste projeto Supabase a chamar o Gemini, por nove Edge

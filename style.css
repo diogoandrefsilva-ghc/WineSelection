@@ -190,11 +190,21 @@ a.pont-badge:active{opacity:.7}
 .carta-check{width:16px;height:16px;flex:0 0 auto;accent-color:var(--wine)}
 .carta-nome{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .carta-score{color:var(--mu);white-space:nowrap;font-weight:600;font-size:11.5px}
-/* Uma nota PESQUISADA (que veio do catálogo partilhado) e um PALPITE do
-   modelo viviam na mesma coluna com o mesmo aspeto — e não são a mesma
-   coisa. A pesquisada fica dourada, que é a cor da distinção nesta app; a
-   estimativa fica em cinzento com um `~` à frente, que é o que ela é. */
-.carta-score.conhecida{color:var(--wr)}
+/* Ou sabemos ou não sabemos: uma nota com fonte (catálogo ou pesquisa a
+   sério) fica dourada, que é a cor da distinção nesta app; um vinho sem
+   dados diz "sem dados" em itálico — nunca um número. A estimativa de
+   memória do modelo (o antigo "~") deixou de existir. */
+.carta-score.conhecida{color:var(--wr);text-decoration:none}
+.carta-score.sem-dados{font-weight:500;font-style:italic;opacity:.8}
+/* Nome numa linha, produtor · ano · castas noutra, ellipsis nos dois — um
+   nome comprido de produtor não pode atropelar o do vinho. */
+.carta-sub{display:block;color:var(--mu);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.carta-check-vazio{width:16px;height:16px}
+/* O "barato/justo/caro" é uma CONTA (preço da carta ÷ preço de loja), feita
+   em código — a cor do preço di-lo sem ocupar mais uma coluna. */
+.carta-preco.preco-barato,.carta-preco.preco-justo{color:var(--vd);font-weight:600}
+.carta-preco.preco-caro{color:var(--wr);font-weight:600}
+.carta-preco.preco-muito_caro{color:var(--dg);font-weight:600}
 .carta-ano{color:var(--mu);font-weight:500;font-size:10.5px;margin-left:3px}
 /* O aviso de que esta verificação já existia: instantânea e sem espera
    parece uma resposta a fingir, e não é — só já tinha sido paga. */
