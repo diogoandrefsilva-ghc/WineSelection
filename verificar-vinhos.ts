@@ -254,6 +254,26 @@ function castasDaLista(raw: unknown): string[] {
    fundamento, e é o que faz o catálogo servir a próxima carta — pagar uma
    pesquisa e guardar só metade do que ela encontrou era pagar a outra
    metade da próxima vez. */
+/* O que o Gemini diz sobre a PESQUISA que fez (ou não fez) — para se
+   perceber porque é que as fontes vêm a zero em todas as funções do
+   projeto (24/09/2026). Três respostas possíveis, e levam a decisões
+   diferentes: sem `groundingMetadata` nenhum (o modelo não pesquisou);
+   com `webSearchQueries` mas sem `groundingChunks` (pesquisou, e as
+   fontes vêm noutro sítio ou não vêm); ou com chunks (estávamos a ler
+   mal). `toolUsePromptTokenCount` é o que a pesquisa meteu na entrada do
+   modelo — a zero, não houve resultados de pesquisa nenhuns. */
+function resumoGrounding(gd: any): Record<string, unknown> {
+  const gm = gd?.candidates?.[0]?.groundingMetadata;
+  return {
+    metadata: !!gm,
+    chaves: gm && typeof gm === "object" ? Object.keys(gm).slice(0, 12) : [],
+    pesquisas: Array.isArray(gm?.webSearchQueries) ? gm.webSearchQueries.slice(0, 8).map((q: unknown) => String(q).slice(0, 120)) : [],
+    chunks: Array.isArray(gm?.groundingChunks) ? gm.groundingChunks.length : 0,
+    supports: Array.isArray(gm?.groundingSupports) ? gm.groundingSupports.length : 0,
+    toolTokens: gd?.usageMetadata?.toolUsePromptTokenCount ?? null,
+  };
+}
+
 type VinhoPedido = {
   i: number; nome: string; produtor: string | null; ano: number | null;
   tipo: string | null; regiao: string | null; preco: number | null;
@@ -864,6 +884,7 @@ async function processarVerificacao(
     });
     const paraIA = vinhos.filter((_, k) => !novos[k]);
     let fontesN: number | null = null;
+    let grounding: Record<string, unknown> | null = null;
 
     if (paraIA.length) {
       const parts = [{ text: promptVerificacao(paraIA) }];
@@ -944,6 +965,8 @@ async function processarVerificacao(
       }
 
       fontesN = (gd?.candidates?.[0]?.groundingMetadata?.groundingChunks ?? []).length;
+      grounding = resumoGrounding(gd);
+      console.log("VERIFICAR-VINHOS grounding:", JSON.stringify(grounding));
       const parsed: any = extrairJson(texto2);
       const brutos: any[] = Array.isArray(parsed?.resultados) ? parsed.resultados : [];
       // Pelo "n" que o modelo devolveu; pela ordem só se não o devolver.
@@ -1025,10 +1048,12 @@ async function processarVerificacao(
       catalogo: vinhos.length - paraIA.length, gemini: paraIA.length,
       pesquisa: paraIA.length > 0,
       nao_encontrados: vinhosResultado.filter((v) => v.naoEncontrado).length,
-      // Ver o CLAUDE.md da WineCatalog: uma pesquisa com ZERO fontes pode ter
-      // sido respondida de memória. Conta-se aqui para se poder decidir com
-      // números se se recusa a escrita sem grounding.
+      // Sem fontes NÃO se recusa (decidido a 24/09/2026, igual em todas as
+      // apps): o que as pesquisas trouxeram estava certo. Conta-se, e o
+      // `grounding` diz se as fontes se perdem do nosso lado — ver o
+      // CLAUDE.md da WineCatalog, "ZERO fontes".
       ...(fontesN != null ? { fontes: fontesN } : {}),
+      ...(grounding ? { grounding } : {}),
       recomendacao,
       ...(rec.motivo ? { recomendacao_motivo: rec.motivo } : {}),
       ...(rec.modelo ? { modelo_leve: rec.modelo } : {}),

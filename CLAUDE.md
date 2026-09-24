@@ -235,9 +235,10 @@ app pré-selecciona os que a recomendação apontou em `pesquisar`.
   nome, o PRODUTOR (só o que a carta dizia — um produtor achado pela
   pesquisa não mexe na identidade) e o ano. Só o que é do VINHO: nunca o
   preço da carta nem o "barato/caro".
-- Conta as fontes do grounding (`fontes: N` no log). Ver o `CLAUDE.md` da
-  WineCatalog: se isto andar a zero, o passo seguinte é recusar a escrita
-  sem grounding.
+- Conta as fontes do grounding (`fontes: N`) e regista o `grounding` (se
+  houve pesquisa, que termos, quantos chunks). Sem fontes **não se
+  recusa** — decidido a 24/09/2026, igual em todas as apps; ver o
+  `CLAUDE.md` da WineCatalog, "ZERO fontes".
 - Mesma arquitetura assíncrona da `sugerir-vinho` (`EdgeRuntime.waitUntil` +
   polling), na MESMA linha de `wineselection.analises` — só nas colunas
   `verificacao_estado`/`verificacao`/`verificacao_erro`. Nunca toca em
