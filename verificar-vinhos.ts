@@ -330,7 +330,11 @@ Para CADA UM, usa PESQUISA GOOGLE para confirmar:
 
 ${lista}
 
-Devolve APENAS um objeto JSON com esta forma exata:
+${profunda ? `Primeiro PESQUISA no Google, vinho a vinho, por exemplo:
+${vinhos.map((v) => `  · "${[v.nome, v.produtor, v.ano].filter(Boolean).join(" ")} vivino"`).join("\n")}
+e escreve, em texto corrido, o que encontraste para cada um e em que sítio.
+Depois, no FIM da resposta, numa linha que comece por JSON:, escreve um objeto
+JSON com esta forma exata:` : "Devolve APENAS um objeto JSON com esta forma exata:"}
 {"resultados": [{"n": number,
   "pontuacao": [{"fonte": string, "valor": number, "escala": number, "url": string|null}],
   "faixaMercado": string|null,
@@ -345,16 +349,21 @@ Regras:
   restaurante; null se não encontrares um fiável.
 - "castas", "regiao", "tipo", "harmonizacao": só o que
   encontraste; na dúvida [] ou null. Nunca inventes castas.
-Responde só com o JSON, sem texto à volta e sem blocos de código.${profunda ? `
-
-OBRIGATÓRIO — PESQUISA A SÉRIO, NÃO DE MEMÓRIA:
-- Antes de escreveres o JSON, usa a ferramenta de pesquisa Google pelo menos
-  UMA VEZ POR VINHO, por exemplo:
-${vinhos.map((v) => `  · "${[v.nome, v.produtor, v.ano].filter(Boolean).join(" ")} vivino"`).join("\n")}
-- Um valor que a pesquisa não confirmar fica vazio ([] ou null), MESMO que
-  aches que sabes a resposta. Esta pesquisa foi pedida precisamente porque
-  a resposta de memória não chega.` : ""}`;
+${profunda
+    ? `- Um valor que a pesquisa não confirmar fica vazio ([] ou null), MESMO que
+  aches que sabes a resposta.`
+    : "Responde só com o JSON, sem texto à volta e sem blocos de código."}`;
 };
+
+/* O que faz o modelo pesquisar a sério (testado a 24/09/2026, ver o
+   CLAUDE.md da WineCatalog, "De memória ou pesquisado"): não é pedir-lho
+   com mais força — com "Responde só com o JSON" ele preenche de memória,
+   com ou sem "OBRIGATÓRIO". Deixá-lo escrever primeiro o que encontrou, e
+   o JSON só no fim numa linha "JSON:", é o que o põe a pesquisar. */
+function jsonDoFim(txt: string): string {
+  const i = txt.lastIndexOf("JSON:");
+  return i >= 0 ? txt.slice(i + 5) : txt;
+}
 
 type Conhecido = {
   nome: string; produtor: string; ano: number | null;
@@ -945,7 +954,9 @@ async function processarVerificacao(
       const chamarGemini = (m: string) => fetch(`${GAPI}/models/${m}:generateContent?key=${GEMINI_KEY}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        signal: ctrl.signal,
+        // Na profunda, cada modelo tem o seu tecto: um que se arraste não
+        // pode levar consigo a resposta de reserva do anterior.
+        signal: profunda ? AbortSignal.any([ctrl.signal, AbortSignal.timeout(35_000)]) : ctrl.signal,
         body: JSON.stringify({
           contents: [{ role: "user", parts }],
           generationConfig: { temperature: 0 },
@@ -954,7 +965,9 @@ async function processarVerificacao(
       });
 
       const transitorio = (st: number) => st === 429 || st === 500 || st === 503;
-      const candidatos = await candidatosModelo(ctrl.signal);
+      // A profunda fica pelos dois estáveis (a volta por todos os candidatos
+      // esgotava o tempo — ver a `catalogo-info`, 24/09/2026).
+      const candidatos = (await candidatosModelo(ctrl.signal)).slice(0, profunda ? 2 : undefined);
       if (ctrl.signal.aborted) throw new DOMException("timeout", "AbortError");
       console.log("VERIFICAR-VINHOS candidatos:", candidatos.join(", "));
       let g: Response | null = null;
@@ -967,7 +980,13 @@ async function processarVerificacao(
 
       for (let ci = 0; ci < candidatos.length && !ctrl.signal.aborted; ci++) {
         model = candidatos[ci];
-        g = await chamarGemini(model);
+        try {
+          g = await chamarGemini(model);
+        } catch (e) {
+          if (ctrl.signal.aborted || !semPesquisa) throw e;
+          g = null;
+          break;
+        }
         console.log("VERIFICAR-VINHOS tentativa:", model, "->", g.status);
         /* Um 200 com o corpo VAZIO não é resposta. Lê-se o corpo AQUI para
            se poder passar ao modelo seguinte, e sobretudo para isto NÃO
@@ -1034,7 +1053,7 @@ async function processarVerificacao(
       fontesGd = fontesDe(gd);
       for (const v of paraIA) pesqWeb.set(v.i, pesquisouVinho(gd, v.nome));
       console.log("VERIFICAR-VINHOS grounding:", JSON.stringify(grounding));
-      const parsed: any = extrairJson(texto2);
+      const parsed: any = extrairJson(profunda ? jsonDoFim(texto2) : texto2);
       const brutos: any[] = Array.isArray(parsed?.resultados) ? parsed.resultados : [];
       // Pelo "n" que o modelo devolveu; pela ordem só se não o devolver.
       const porN = (k: number) => brutos.find((b) => Number(b?.n) === k + 1) ?? (brutos.every((b) => b?.n == null) ? brutos[k] : null);
