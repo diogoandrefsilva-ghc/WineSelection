@@ -215,7 +215,8 @@ avisos dos resultados antigos do histórico.
 
 ## A Edge Function `verificar-vinhos`
 É a ÚNICA pesquisa paga desta app: até **4** vinhos que o catálogo ainda
-não conhece (ou conhece sem nota e preço), escolhidos à mão na lista — a
+não conhece (um vinho já conhecido, mesmo sem nota, não volta a ter visto:
+essa pesquisa já foi feita), escolhidos à mão na lista — a
 app pré-selecciona os que a recomendação apontou em `pesquisar`.
 - **O catálogo responde primeiro**: alguém pode tê-los pesquisado entretanto
   (aqui, na Garrafeira, na WineCatalog). Os que já lá estão COMPLETOS (nota

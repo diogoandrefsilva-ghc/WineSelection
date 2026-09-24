@@ -511,11 +511,14 @@ function wsMesclar(res,verif){
   return d;
 }
 
-/* Completo = tem nota E preço de mercado. É a mesma trave da
-   `verificar-vinhos`: só esses é que não vale a pena pesquisar. */
-function wsCompleto(v){
-  const k=v&&v.conhecido;
-  return !!(k&&k.nota!=null&&k.precoMercado!=null);
+/* Só se oferece para pesquisar o que NÃO SE SABE. Um vinho que já tem
+   dados (do catálogo ou de uma pesquisa desta carta) mas ficou sem nota não
+   volta a ter visto: a pesquisa já foi feita e não encontrou a nota, e
+   deixá-lo aberto era convidar a pagar outra vez pela mesma resposta
+   (24/09/2026: a Curvatura e a Vall da Nogueirinha, pesquisadas na
+   primeira ronda, voltavam a aparecer para pesquisar). */
+function wsPesquisavel(v){
+  return !!v&&!v.conhecido&&!v.naoEncontrado;
 }
 
 function wsResultadoHTML(d,opts){
@@ -560,7 +563,7 @@ function wsResultadoV2HTML(analiseId){
     // Pré-seleccionar os que a recomendação apontou para pesquisar — só na
     // primeira vez: depois é a escolha de quem está à mesa que manda.
     if(!_wsVerifSel[analiseId]){
-      _wsVerifSel[analiseId]=new Set((d.pesquisar||[]).filter(i=>vinhos[i]&&!wsCompleto(vinhos[i])&&!vinhos[i].naoEncontrado).slice(0,WS_VERIF_MAX));
+      _wsVerifSel[analiseId]=new Set((d.pesquisar||[]).filter(i=>wsPesquisavel(vinhos[i])).slice(0,WS_VERIF_MAX));
     }
     const sel=_wsVerifSel[analiseId];
     const nConh=vinhos.filter(v=>v.conhecido).length;
@@ -620,7 +623,7 @@ function wsSugDetHTML(v,k,todas){
 function wsCartaItemV2HTML(v,i,analiseId,sel){
   const k=v.conhecido;
   const tipo=v.tipo||(k&&k.tipo)||null;
-  const podePesquisar=!wsCompleto(v)&&!v.naoEncontrado;
+  const podePesquisar=wsPesquisavel(v);
   const sub=[v.produtor||(k&&k.produtor),v.ano,k&&Array.isArray(k.castas)&&k.castas.length?k.castas.slice(0,3).join(', '):null].filter(Boolean).map(esc).join(' · ');
   let score;
   if(k&&k.nota!=null){
