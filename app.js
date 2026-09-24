@@ -500,6 +500,7 @@ function wsMesclar(res,verif){
       if(!v)return;
       if(x.conhecido){v.conhecido=x.conhecido;v.precoAvaliacao=x.precoAvaliacao||null;v.naoEncontrado=false;}
       else if(x.naoEncontrado&&!v.conhecido)v.naoEncontrado=true;
+      if(typeof x.pesquisaWeb==='boolean')v.pesquisaWeb=x.pesquisaWeb;
     });
     if(verif.recomendacao!=='falhou'){
       d.sugestoes=Array.isArray(verif.sugestoes)?verif.sugestoes:[];
@@ -519,6 +520,16 @@ function wsMesclar(res,verif){
    primeira ronda, voltavam a aparecer para pesquisar). */
 function wsPesquisavel(v){
   return !!v&&!v.conhecido&&!v.naoEncontrado;
+}
+
+/* ── DE MEMÓRIA OU PESQUISADO (só o admin vê) ──
+   O Gemini decide sozinho se usa a pesquisa Google, e muitas vezes responde
+   com o que aprendeu no treino. Para toda a gente isto fica como está (é
+   barato e costuma acertar); ao admin, os vinhos que voltaram SEM pesquisa
+   levam 🧠 e há um botão para os pesquisar outra vez obrigando à pesquisa
+   (`profunda`). A Edge Function volta a confirmar que é o admin. */
+function wsDeMemoria(v){
+  return !!v&&v.pesquisaWeb===false;
 }
 
 function wsResultadoHTML(d,opts){
@@ -568,6 +579,7 @@ function wsResultadoV2HTML(analiseId){
     const sel=_wsVerifSel[analiseId];
     const nConh=vinhos.filter(v=>v.conhecido).length;
     const pendente=!!_wsVerifPolls[analiseId];
+    const memoria=isAdmin()?vinhos.map((v,i)=>wsDeMemoria(v)?i:-1).filter(i=>i>=0):[];
     html+=`<div class="ws-card">
       <div class="ws-card-label">Vinhos da carta (${vinhos.length}) · ${nConh} conhecido${nConh===1?'':'s'}</div>
       <p class="ws-note" style="margin-top:-4px">⭐ é a nota do Vivino. <b>sem dados</b> quer dizer que ainda não pesquisámos esse vinho — escolhe até ${WS_VERIF_MAX} e eu pesquiso.</p>
@@ -575,6 +587,8 @@ function wsResultadoV2HTML(analiseId){
       <div class="carta-list">${vinhos.map((v,i)=>wsCartaItemV2HTML(v,i,analiseId,sel)).join('')}</div>
       <div class="verif-bar">
         <button type="button" class="btn-n" id="btn-verificar-${analiseId}" onclick="wsVerificar(${analiseId})" ${(!sel.size||pendente)?'disabled':''}>🔎 Pesquisar selecionados (<span id="verif-count-${analiseId}">${sel.size}</span>)</button>
+        ${memoria.length?`<p class="ws-note" style="margin:10px 0 6px">🧠 ${memoria.length===1?'Um vinho voltou':memoria.length+' vinhos voltaram'} sem pesquisa Google — o Gemini respondeu de memória.</p>
+        <button type="button" class="btn-n btn-profunda" id="btn-profunda-${analiseId}" onclick="wsVerificar(${analiseId},true)" ${pendente?'disabled':''}>🔬 Pesquisa profunda (${Math.min(memoria.length,WS_VERIF_MAX)})</button>`:''}
         <div id="verif-status-${analiseId}" class="ws-note" style="${pendente?'':'display:none'}">${pendente?'A pesquisar a sério — pode demorar um pouco…':''}</div>
       </div>
     </div>`;
@@ -643,7 +657,7 @@ function wsCartaItemV2HTML(v,i,analiseId,sel){
   return `<div class="carta-item">
     ${podePesquisar?`<input type="checkbox" class="carta-check" data-analise="${analiseId}" data-i="${i}" ${sel.has(i)?'checked':''} onchange="wsVerifToggle(this)">`:'<span class="carta-check-vazio"></span>'}
     <span class="tipo-dot" style="background:${wsTipoCor(tipo)}" title="${esc(tipo||'Tipo desconhecido')}"></span>
-    <span class="carta-nome">${esc(v.nome||'')}${sub?`<span class="carta-sub">${sub}</span>`:''}</span>
+    <span class="carta-nome">${esc(v.nome||'')}${isAdmin()&&wsDeMemoria(v)?' <span class="carta-memoria" title="Respondido de memória — sem pesquisa Google">🧠</span>':''}${sub?`<span class="carta-sub">${sub}</span>`:''}</span>
     ${score}
     <span class="carta-preco${cls&&cls!=='desconhecido'?' preco-'+cls:''}"${precoTit?` title="${esc(precoTit)}"`:''}>${fmtEur(v.preco)}</span>
   </div>`;
@@ -714,19 +728,27 @@ function wsVerifStatus(analiseId,txt,erro){
 function wsVerifBotoes(analiseId,desligar){
   const sel=_wsVerifSel[analiseId];
   document.querySelectorAll('#btn-verificar-'+analiseId).forEach(b=>{b.disabled=desligar||!sel||!sel.size;});
+  document.querySelectorAll('#btn-profunda-'+analiseId).forEach(b=>{b.disabled=!!desligar;});
 }
 
-async function wsVerificar(analiseId){
-  const sel=_wsVerifSel[analiseId];
-  if(!sel||!sel.size)return;
-  const indices=[...sel];
+async function wsVerificar(analiseId,profunda){
+  let indices;
+  if(profunda){
+    const st=_wsAnalises[analiseId];
+    const vinhos=st?wsMesclar(st.resultado,st.verificacao).vinhosCarta:[];
+    indices=vinhos.map((v,i)=>wsDeMemoria(v)?i:-1).filter(i=>i>=0).slice(0,WS_VERIF_MAX);
+  }else{
+    const sel=_wsVerifSel[analiseId];
+    indices=sel?[...sel]:[];
+  }
+  if(!indices.length)return;
   wsVerifBotoes(analiseId,true);
-  wsVerifStatus(analiseId,'A pesquisar a sério — pode demorar um pouco…');
+  wsVerifStatus(analiseId,profunda?'Pesquisa profunda — a obrigar o Gemini a pesquisar no Google…':'A pesquisar a sério — pode demorar um pouco…');
   try{
     const r=await sbFetch(`${SB_URL}/functions/v1/verificar-vinhos`,{
       method:'POST',
       headers:{'Content-Type':'application/json','apikey':SB_KEY},
-      body:JSON.stringify({analiseId,indices})
+      body:JSON.stringify(profunda?{analiseId,indices,profunda:true}:{analiseId,indices})
     });
     let d={};try{d=await r.json();}catch(_){}
     if(!r.ok){
@@ -790,7 +812,8 @@ function wsVerifConcluida(analiseId,verificacao){
   delete _wsVerifSel[analiseId];
   wsRedesenhar(analiseId);
   const n=(verificacao.vinhos||[]).filter(x=>x.naoEncontrado).length;
-  toast(n?`Pesquisa feita — ${n} sem dados fiáveis`:'Pesquisa feita ✓');
+  const mem=isAdmin()?(verificacao.vinhos||[]).filter(x=>x.pesquisaWeb===false).length:0;
+  toast(mem?`Pesquisa feita — ${mem} de memória, sem Google`:n?`Pesquisa feita — ${n} sem dados fiáveis`:'Pesquisa feita ✓');
 }
 
 /* Uma verificação antiga (de antes da versão 2) que volte num instante e

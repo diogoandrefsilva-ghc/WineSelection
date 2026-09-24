@@ -215,12 +215,13 @@ const TIPOS_PARTILHADOS = ["Tinto", "Branco", "Rosé", "Espumante"];
 
 async function catalogoJuntar(
   nome: string, produtor: string | null, ano: number | null, ficha: Record<string, unknown>, signal?: AbortSignal,
+  fontes: { titulo: string; url: string }[] = [],
 ) {
   try {
     if (!nome || !Object.keys(ficha).length) return;
     await catalogoRpc("juntar", {
       p_nome: nome, p_produtor: produtor || "", p_ano: ano,
-      p_ficha: ficha, p_origem: "ws-verificacao", p_fontes: [],
+      p_ficha: ficha, p_origem: "ws-verificacao", p_fontes: fontes,
     }, signal);
   } catch (_) { /* o catálogo nunca falha uma verificação */ }
 }
@@ -274,12 +275,48 @@ function resumoGrounding(gd: any): Record<string, unknown> {
   };
 }
 
+/* ── HOUVE PESQUISA OU NÃO ──
+   Ligar o `google_search` não obriga o modelo a pesquisar: ele decide, e
+   nos registos de 24/09/2026 nunca o fez (em nenhuma das apps) — as
+   respostas vinham do que o modelo aprendeu no treino. Não se recusa por
+   isso (é barato, e para vinhos conhecidos acerta), mas passa a SABER-SE:
+   cada vinho pesquisado leva `pesquisaWeb`, e ao admin a app oferece uma
+   "pesquisa profunda" (`profunda:true`), que exige a pesquisa no prompt e
+   passa ao modelo seguinte se a resposta vier sem ela. Ver o CLAUDE.md da
+   WineCatalog, "De memória ou pesquisado". */
+function fezPesquisa(gd: any): boolean {
+  const gm = gd?.candidates?.[0]?.groundingMetadata;
+  return (Array.isArray(gm?.webSearchQueries) && gm.webSearchQueries.length > 0) ||
+    (Array.isArray(gm?.groundingChunks) && gm.groundingChunks.length > 0) ||
+    Number(gd?.usageMetadata?.toolUsePromptTokenCount ?? 0) > 0;
+}
+const semAcentos = (x: string) => x.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+/* A pesquisa é de uma chamada só, para até 4 vinhos: um vinho conta como
+   pesquisado se alguma das pesquisas feitas tiver uma palavra do nome dele.
+   Sem a lista de pesquisas (só fontes), conta-se tudo como pesquisado. */
+function pesquisouVinho(gd: any, nome: string): boolean {
+  if (!fezPesquisa(gd)) return false;
+  const qs: string[] = (gd?.candidates?.[0]?.groundingMetadata?.webSearchQueries ?? []).map((q: unknown) => semAcentos(String(q)));
+  if (!qs.length) return true;
+  const palavras = semAcentos(nome).split(/[^a-z0-9]+/).filter((w) => w.length >= 4);
+  return !palavras.length || palavras.some((w) => qs.some((q) => q.includes(w)));
+}
+function fontesDe(gd: any): { titulo: string; url: string }[] {
+  const chunks = gd?.candidates?.[0]?.groundingMetadata?.groundingChunks;
+  if (!Array.isArray(chunks)) return [];
+  return chunks.map((c: any) => ({ titulo: String(c?.web?.title || c?.web?.uri || "").slice(0, 120), url: String(c?.web?.uri || "").slice(0, 400) }))
+    .filter((f) => /^https?:\/\//i.test(f.url)).slice(0, 8);
+}
+/* Quem pode pedir a pesquisa profunda. É o mesmo email do `ADMIN_EMAIL`
+   do app.js; a app só esconde o botão, quem decide é aqui. */
+const ADMIN_EMAIL = (Deno.env.get("WS_ADMIN_EMAIL") || "diogo.andre.f.silva@gmail.com").toLowerCase();
+
 type VinhoPedido = {
   i: number; nome: string; produtor: string | null; ano: number | null;
   tipo: string | null; regiao: string | null; preco: number | null;
 };
 
-const promptVerificacao = (vinhos: VinhoPedido[]) => {
+const promptVerificacao = (vinhos: VinhoPedido[], profunda = false) => {
   const lista = vinhos.map((v, k) =>
     `${k + 1}. ${v.nome}${v.produtor ? ` — produtor: ${v.produtor}` : ""}${v.ano ? ` — colheita ${v.ano}` : ""}${v.tipo ? ` — ${v.tipo}` : ""}${v.regiao ? ` (${v.regiao})` : ""}`
   ).join("\n");
@@ -308,7 +345,15 @@ Regras:
   restaurante; null se não encontrares um fiável.
 - "castas", "regiao", "tipo", "harmonizacao": só o que
   encontraste; na dúvida [] ou null. Nunca inventes castas.
-Responde só com o JSON, sem texto à volta e sem blocos de código.`;
+Responde só com o JSON, sem texto à volta e sem blocos de código.${profunda ? `
+
+OBRIGATÓRIO — PESQUISA A SÉRIO, NÃO DE MEMÓRIA:
+- Antes de escreveres o JSON, usa a ferramenta de pesquisa Google pelo menos
+  UMA VEZ POR VINHO, por exemplo:
+${vinhos.map((v) => `  · "${[v.nome, v.produtor, v.ano].filter(Boolean).join(" ")} vivino"`).join("\n")}
+- Um valor que a pesquisa não confirmar fica vazio ([] ou null), MESMO que
+  aches que sabes a resposta. Esta pesquisa foi pedida precisamente porque
+  a resposta de memória não chega.` : ""}`;
 };
 
 type Conhecido = {
@@ -823,6 +868,7 @@ async function processarVerificacao(
   prato: string,
   quem: string,
   analiseId: number,
+  profunda = false,
 ): Promise<void> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), PROC_TIMEOUT_MS);
@@ -882,12 +928,17 @@ async function processarVerificacao(
       const c = carta[v.i].conhecido as any;
       return (c && c.nota != null && c.precoMercado != null) ? c : null;
     });
-    const paraIA = vinhos.filter((_, k) => !novos[k]);
+    // A profunda pesquisa os escolhidos TODOS: o que lá está pode ter vindo
+    // de memória, e é isso mesmo que se quer confirmar.
+    const paraIA = profunda ? vinhos.slice() : vinhos.filter((_, k) => !novos[k]);
+    const pesqWeb = new Map<number, boolean>();
+    let fontesGd: { titulo: string; url: string }[] = [];
+    const mantidos = new Set<number>();
     let fontesN: number | null = null;
     let grounding: Record<string, unknown> | null = null;
 
     if (paraIA.length) {
-      const parts = [{ text: promptVerificacao(paraIA) }];
+      const parts = [{ text: promptVerificacao(paraIA, profunda) }];
       /* Aqui o `google_search` está SEMPRE ligado (é a razão de esta função
          existir), por isso não há variante "sem pensar": pedir
          thinkingBudget:0 com o tool de pesquisa dá 400. */
@@ -910,6 +961,9 @@ async function processarVerificacao(
       let gd: any = null;
       let texto2 = "";
       let vazioMotivo = "";
+      // Na profunda, uma resposta sem pesquisa guarda-se como recurso e
+      // tenta-se o modelo seguinte; se nenhum pesquisar, fica esta.
+      let semPesquisa: { gd: any; texto: string; model: string } | null = null;
 
       for (let ci = 0; ci < candidatos.length && !ctrl.signal.aborted; ci++) {
         model = candidatos[ci];
@@ -928,12 +982,23 @@ async function processarVerificacao(
           texto2 = (cand?.content?.parts ?? []).map((p: any) => p?.text ?? "").join("").trim();
           console.log("VERIFICAR-VINHOS resposta:", model, "finishReason:", vazioMotivo,
                       "texto:", texto2.length, "tokens saída:", gd?.usageMetadata?.candidatesTokenCount ?? 0);
+          if (texto2 && profunda && !fezPesquisa(gd)) {
+            if (!semPesquisa) semPesquisa = { gd, texto: texto2, model };
+            texto2 = "";
+            g = null;
+            continue;
+          }
           if (texto2) break;
           g = null;
           continue;
         }
         if (g.status === 404) { _models = null; continue; }
         if (!transitorio(g.status)) break;
+      }
+
+      if (!texto2 && semPesquisa) {
+        ({ gd, texto: texto2, model } = semPesquisa);
+        g = null;
       }
 
       if (g && !g.ok) {
@@ -966,6 +1031,8 @@ async function processarVerificacao(
 
       fontesN = (gd?.candidates?.[0]?.groundingMetadata?.groundingChunks ?? []).length;
       grounding = resumoGrounding(gd);
+      fontesGd = fontesDe(gd);
+      for (const v of paraIA) pesqWeb.set(v.i, pesquisouVinho(gd, v.nome));
       console.log("VERIFICAR-VINHOS grounding:", JSON.stringify(grounding));
       const parsed: any = extrairJson(texto2);
       const brutos: any[] = Array.isArray(parsed?.resultados) ? parsed.resultados : [];
@@ -994,9 +1061,16 @@ async function processarVerificacao(
           produtor: v.produtor,
           origem: "pesquisa",
           origemEm: new Date().toISOString(),
+          pesquisaWeb: pesqWeb.get(v.i) ?? false,
         };
         const achou = pontuacao.length || precoMercado != null || castas.length || conhecido.harmonizacao;
         novos[vinhos.indexOf(v)] = achou ? conhecido : { naoEncontrado: true, origem: "pesquisa" };
+        if (!achou && profunda && !pesqWeb.get(v.i)) {
+          // A profunda não pesquisou e não trouxe nada: o que já se sabia
+          // (do catálogo ou de outra ronda) não se deita fora por isso.
+          const antes = carta[v.i].conhecido;
+          if (antes) { novos[vinhos.indexOf(v)] = antes as Record<string, unknown>; mantidos.add(v.i); }
+        }
       }
     }
 
@@ -1014,6 +1088,7 @@ async function processarVerificacao(
         conhecido,
         precoAvaliacao: conhecido ? carta[v.i].precoAvaliacao : null,
         naoEncontrado: !conhecido,
+        ...(pesqWeb.has(v.i) ? { pesquisaWeb: pesqWeb.get(v.i) } : {}),
       };
     });
 
@@ -1047,6 +1122,8 @@ async function processarVerificacao(
       modelo: paraIA.length ? model : "catalogo", vinhos: vinhos.length,
       catalogo: vinhos.length - paraIA.length, gemini: paraIA.length,
       pesquisa: paraIA.length > 0,
+      ...(profunda ? { profunda: true } : {}),
+      ...(paraIA.length ? { pesquisou: [...pesqWeb.values()].filter(Boolean).length + "/" + paraIA.length } : {}),
       nao_encontrados: vinhosResultado.filter((v) => v.naoEncontrado).length,
       // Sem fontes NÃO se recusa (decidido a 24/09/2026, igual em todas as
       // apps): o que as pesquisas trouxeram estava certo. Conta-se, e o
@@ -1074,7 +1151,7 @@ async function processarVerificacao(
        Só o que é do VINHO: nunca o preço desta carta nem o "barato/caro". */
     for (const v of paraIA) {
       const k = novos[vinhos.indexOf(v)] as any;
-      if (!k || k.naoEncontrado) continue;
+      if (!k || k.naoEncontrado || mantidos.has(v.i)) continue;
       const ficha: Record<string, unknown> = {};
       if (k.nota != null) ficha.vivino_nota = k.nota;
       if (k.notaUrl) ficha.vivino_url = k.notaUrl;
@@ -1083,7 +1160,7 @@ async function processarVerificacao(
       if (k.regiao) ficha.regiao = k.regiao;
       if (TIPOS_PARTILHADOS.includes(String(k.tipo))) ficha.tipo = k.tipo;
       if (k.harmonizacao) ficha.harmonizacao = k.harmonizacao;
-      await catalogoJuntar(v.nome, v.produtor, v.ano, ficha, ctrl.signal);
+      await catalogoJuntar(v.nome, v.produtor, v.ano, ficha, ctrl.signal, pesqWeb.get(v.i) ? fontesGd : []);
     }
   } catch (e) {
     const err = e as Error;
@@ -1121,7 +1198,12 @@ Deno.serve(async (req) => {
       return json({ error: "não autorizado" }, 403);
     }
 
-    const { analiseId, indices, vinhos } = await req.json().catch(() => ({}) as any);
+    const { analiseId, indices, vinhos, profunda } = await req.json().catch(() => ({}) as any);
+    const querProfunda = profunda === true;
+    if (querProfunda && String(quem ?? "").toLowerCase() !== ADMIN_EMAIL) {
+      await registar("erro", { passo: "profunda_nao_admin" }, quem);
+      return json({ error: "a pesquisa profunda é só para o admin" }, 403);
+    }
     const id = typeof analiseId === "number" ? analiseId : parseInt(String(analiseId), 10);
     if (!Number.isFinite(id)) {
       await registar("erro", { passo: "analiseId" }, quem);
@@ -1156,7 +1238,7 @@ Deno.serve(async (req) => {
 
     // NÃO faz await — mesma razão da sugerir-vinho.ts: a pesquisa Google
     // pode demorar, e isto sobrevive ao pedido original terminar.
-    EdgeRuntime.waitUntil(processarVerificacao(pedidos, dona.resultado, dona.anterior, dona.prato, quem!, id));
+    EdgeRuntime.waitUntil(processarVerificacao(pedidos, dona.resultado, dona.anterior, dona.prato, quem!, id, querProfunda));
 
     return json({ estado: "pendente" }, 202);
   } catch (e) {

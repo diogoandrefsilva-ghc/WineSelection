@@ -200,6 +200,8 @@ a.pont-badge:active{opacity:.7}
    nome comprido de produtor não pode atropelar o do vinho. */
 .carta-sub{display:block;color:var(--mu);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .carta-check-vazio{width:16px;height:16px}
+.carta-memoria{font-size:11px;cursor:help}
+.btn-profunda{border-color:var(--gold)}
 /* O "barato/justo/caro" é uma CONTA (preço da carta ÷ preço de loja), feita
    em código — a cor do preço di-lo sem ocupar mais uma coluna. */
 .carta-preco.preco-barato,.carta-preco.preco-justo{color:var(--vd);font-weight:600}

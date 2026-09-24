@@ -240,6 +240,17 @@ app pré-selecciona os que a recomendação apontou em `pesquisar`.
   houve pesquisa, que termos, quantos chunks). Sem fontes **não se
   recusa** — decidido a 24/09/2026, igual em todas as apps; ver o
   `CLAUDE.md` da WineCatalog, "ZERO fontes".
+- **De memória ou pesquisado (24/09/2026).** O Gemini decide sozinho se
+  usa a pesquisa Google, e nos registos nunca a usou: respondeu com o que
+  aprendeu no treino. Para toda a gente fica assim. Cada vinho pesquisado
+  leva `pesquisaWeb`; ao admin (`ADMIN_EMAIL`, confirmado também na
+  função) os de memória aparecem com 🧠 e há o botão **🔬 Pesquisa
+  profunda**, que manda `profunda:true`: o prompt exige a pesquisa, uma
+  resposta sem ela passa ao modelo seguinte, e pesquisa os escolhidos
+  TODOS (mesmo os que o catálogo já tinha completos — podem ter lá chegado
+  de memória). As fontes, quando as há, vão para o catálogo. Mesmo
+  critério nas quatro apps — ver o `CLAUDE.md` da WineCatalog, "De memória
+  ou pesquisado".
 - Mesma arquitetura assíncrona da `sugerir-vinho` (`EdgeRuntime.waitUntil` +
   polling), na MESMA linha de `wineselection.analises` — só nas colunas
   `verificacao_estado`/`verificacao`/`verificacao_erro`. Nunca toca em
