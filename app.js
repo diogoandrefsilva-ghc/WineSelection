@@ -443,15 +443,6 @@ function wsCoerenciaHTML(v){
   return `<div class="vinho-alerta">${avisos.map(a=>`<p>⚠️ ${esc(a)}</p>`).join('')}</div>`;
 }
 
-/* De onde vêm os factos do cartão. A recomendação nunca inventa uma nota
-   nem um preço (ver `recomendar` na Edge Function): o que está no cartão
-   veio do catálogo ou de uma pesquisa a sério, e diz-se qual. */
-function wsSugOrigemHTML(v){
-  if(v.origem==='catalogo')return `<div class="verif-origem">✓ Do catálogo${v.notaAno?' · nota da colheita de '+esc(v.notaAno):''} — não foi preciso pesquisar.</div>`;
-  if(v.origem==='pesquisa')return `<div class="verif-origem">🔎 Pesquisado agora — ficou guardado no catálogo.</div>`;
-  return '';
-}
-
 function wsVinhoCardHTML(v,destaque){
   const pi=PRECO_INFO[(v.precoAvaliacao&&v.precoAvaliacao.classificacao)||'desconhecido']||PRECO_INFO.desconhecido;
   const sub=[v.produtor,v.tipo,v.regiao,v.casta].filter(Boolean).map(esc).join(' · ');
@@ -466,7 +457,6 @@ function wsVinhoCardHTML(v,destaque){
     </div>
     ${wsCoerenciaHTML(v)}
     ${wsPontuacaoHTML(v.pontuacao)}
-    ${wsSugOrigemHTML(v)}
     <div class="preco-badge ${pi.cls}">${pi.txt}${v.precoAvaliacao&&v.precoAvaliacao.faixaMercado?` · ref. ${esc(v.precoAvaliacao.faixaMercado)}`:''}</div>
     ${v.precoAvaliacao&&v.precoAvaliacao.comentario?`<p class="vinho-txt">${esc(v.precoAvaliacao.comentario)}</p>`:''}
     ${v.combinacao?`<p class="vinho-txt"><strong>Porque combina:</strong> ${esc(v.combinacao)}</p>`:''}
@@ -543,6 +533,7 @@ function wsRedesenhar(analiseId){
 }
 
 const WS_REC_TXT={
+  'catalogo-falhou':'Não consegui consultar o que já sabemos destes vinhos — tenta outra vez daqui a um minuto antes de pesquisar, para não pagares por uma pesquisa que já foi feita.',
   'sem-conhecidos':'Ainda não conheço nenhum vinho desta carta — e prefiro não adivinhar. Escolhe até 4 na lista para pesquisar a sério (já deixei marcados os que parecem fazer mais sentido para o prato).',
   'falhou':'Não consegui fazer a recomendação agora — mas a lista abaixo tem tudo o que se sabe de cada vinho.',
   'ok':'Dos vinhos que conheço, nenhum combina bem com este pedido. Pesquisa alguns dos outros na lista.',
@@ -558,7 +549,8 @@ function wsResultadoV2HTML(analiseId){
   let html='';
 
   if(sug.length){
-    html+=sug.map((v,i)=>wsVinhoCardHTML(v,i===0)).join('');
+    html+=`<div class="ws-card-label sug-titulo">A nossa recomendação${sug.length>1?' <em>— toca num vinho para ver o resumo</em>':''}</div>`;
+    html+=sug.map((v,k)=>wsSugDetHTML(v,k,sug)).join('');
   }else{
     const txt=(d.recomendacao==='sem-carta'&&d.aviso)?d.aviso:(WS_REC_TXT[d.recomendacao]||WS_REC_TXT['sem-conhecidos']);
     html+=`<div class="ws-card"><p class="ws-note">${esc(txt)}</p></div>`;
@@ -575,7 +567,7 @@ function wsResultadoV2HTML(analiseId){
     const pendente=!!_wsVerifPolls[analiseId];
     html+=`<div class="ws-card">
       <div class="ws-card-label">Vinhos da carta (${vinhos.length}) · ${nConh} conhecido${nConh===1?'':'s'}</div>
-      <p class="ws-note" style="margin-top:-4px">⭐ é uma nota com fonte (do catálogo ou de uma pesquisa a sério). <b>sem dados</b> quer dizer que ainda ninguém pesquisou esse vinho — escolhe até ${WS_VERIF_MAX} e eu pesquiso; o que encontrar fica guardado para a próxima vez.</p>
+      <p class="ws-note" style="margin-top:-4px">⭐ é a nota do Vivino. <b>sem dados</b> quer dizer que ainda não pesquisámos esse vinho — escolhe até ${WS_VERIF_MAX} e eu pesquiso.</p>
       ${wsLegendaTipos(vinhos)}
       <div class="carta-list">${vinhos.map((v,i)=>wsCartaItemV2HTML(v,i,analiseId,sel)).join('')}</div>
       <div class="verif-bar">
@@ -585,6 +577,44 @@ function wsResultadoV2HTML(analiseId){
     </div>`;
   }
   return html;
+}
+
+/* ── A CAIXA RESUMO ──
+   Todos os vinhos conhecidos, pela ordem da recomendação, cada um com o
+   seu resumo; os 2 ou 3 que recomendamos mesmo levam a marca. Só o
+   primeiro vem aberto — à mesa, a pergunta é "qual?", e a resposta é uma;
+   os outros abrem-se com um toque (`<details>`, sem JavaScript nenhum).
+   Um resultado de antes da ordenação não tem `recomendado`: aí todas as
+   sugestões eram recomendações, e é assim que se mostram. */
+function wsSugDetHTML(v,k,todas){
+  const antigas=!todas.some(x=>x.recomendado!=null);
+  const rec=antigas||!!v.recomendado;
+  const pi=PRECO_INFO[(v.precoAvaliacao&&v.precoAvaliacao.classificacao)||'desconhecido']||PRECO_INFO.desconhecido;
+  const sub=[v.produtor,v.tipo,v.regiao,v.casta].filter(Boolean).map(esc).join(' · ');
+  const p0=Array.isArray(v.pontuacao)&&v.pontuacao[0];
+  const nota=p0&&typeof p0.valor==='number'?`⭐ ${p0.valor.toFixed(1)}`:'<span class="sem-dados">sem nota</span>';
+  const marca=k===0&&rec?'<span class="sug-marca topo">🏆 Melhor escolha</span>':rec?'<span class="sug-marca">Recomendado</span>':'';
+  return `<details class="vinho-card sug-det${rec?' destaque':''}"${k===0?' open':''}>
+    <summary class="sug-sum">
+      <span class="sug-pos">${k+1}</span>
+      <span class="sug-cab">
+        ${marca}
+        <span class="vinho-nome">${esc(v.nome||'Vinho')}</span>
+        ${sub?`<span class="vinho-sub">${sub}</span>`:''}
+      </span>
+      <span class="sug-dir">
+        <span class="vinho-preco">${fmtEur(v.precoCarta)}</span>
+        <span class="sug-nota">${nota}${v.notaAno?`<span class="carta-ano">${esc(' '+v.notaAno)}</span>`:''}</span>
+      </span>
+    </summary>
+    <div class="sug-corpo">
+      ${wsCoerenciaHTML(v)}
+      ${wsPontuacaoHTML(v.pontuacao)}
+      <div class="preco-badge ${pi.cls}">${pi.txt}${v.precoAvaliacao&&v.precoAvaliacao.faixaMercado?` · ref. ${esc(v.precoAvaliacao.faixaMercado)}`:''}</div>
+      ${v.precoAvaliacao&&v.precoAvaliacao.comentario?`<p class="vinho-txt">${esc(v.precoAvaliacao.comentario)}</p>`:''}
+      ${v.combinacao?`<p class="vinho-txt"><strong>Porquê:</strong> ${esc(v.combinacao)}</p>`:''}
+    </div>
+  </details>`;
 }
 
 function wsCartaItemV2HTML(v,i,analiseId,sel){
@@ -757,7 +787,7 @@ function wsVerifConcluida(analiseId,verificacao){
   delete _wsVerifSel[analiseId];
   wsRedesenhar(analiseId);
   const n=(verificacao.vinhos||[]).filter(x=>x.naoEncontrado).length;
-  toast(n?`Pesquisa feita — ${n} sem dados fiáveis`:'Pesquisa feita ✓ — ficou guardada no catálogo');
+  toast(n?`Pesquisa feita — ${n} sem dados fiáveis`:'Pesquisa feita ✓');
 }
 
 /* Uma verificação antiga (de antes da versão 2) que volte num instante e

@@ -252,3 +252,25 @@ a.pont-badge:active{opacity:.7}
 @media (min-width:480px){
   .hdr h1{font-size:21px}
 }
+
+/* A caixa resumo da recomendação: um <details> por vinho, o primeiro
+   aberto. O cabeçalho é o próprio resumo (posição, nome, preço, nota), e o
+   triângulo nativo sai para dar lugar à posição. */
+.sug-titulo em{font-weight:500;text-transform:none;letter-spacing:0}
+.sug-det{padding:12px 14px}
+.sug-det>summary{list-style:none;cursor:pointer}
+.sug-det>summary::-webkit-details-marker{display:none}
+.sug-sum{display:grid;grid-template-columns:auto 1fr auto;gap:10px;align-items:start}
+.sug-pos{width:24px;height:24px;border-radius:50%;background:var(--bo);color:var(--mu);font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center;margin-top:2px}
+.sug-det.destaque .sug-pos{background:var(--gold);color:#fff}
+.sug-cab{min-width:0;display:flex;flex-direction:column;gap:2px}
+.sug-cab .vinho-nome{font-size:16px}
+.sug-cab .vinho-sub{margin-top:0}
+.sug-dir{display:flex;flex-direction:column;align-items:flex-end;gap:3px;white-space:nowrap}
+.sug-nota{font-size:12px;font-weight:700;color:var(--wr)}
+.sug-nota .sem-dados{color:var(--mu);font-weight:500;font-style:italic}
+.sug-marca{align-self:flex-start;font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--wr);background:rgba(201,147,46,.12);border-radius:10px;padding:2px 8px}
+.sug-marca.topo{color:#fff;background:var(--gold)}
+.sug-corpo{margin-top:6px;padding-left:34px}
+.sug-det:not([open]) .sug-dir .vinho-preco{font-size:14px}
+.sug-titulo{margin:2px 4px 8px}

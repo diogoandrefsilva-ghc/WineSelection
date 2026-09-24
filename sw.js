@@ -1,4 +1,4 @@
-const CACHE_NAME = 'ws-cache-v12';
+const CACHE_NAME = 'ws-cache-v13';
 
 self.addEventListener('install', () => self.skipWaiting());
 

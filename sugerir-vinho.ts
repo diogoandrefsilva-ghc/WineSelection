@@ -274,15 +274,13 @@ function somarUsage(total: UsageMetadata | null, add: UsageMetadata | null): Usa
    ela é só visão + texto. Se um dia isto passar de curiosidade a
    orçamento, calibra pela fatura real da Google. */
 const CUSTO_LEITURA_EUR = 0.003;      // fotos, sem pesquisa
-const CUSTO_RECOMENDACAO_EUR = 0.001; // só texto, sem pesquisa
+const CUSTO_RECOMENDACAO_EUR = 0.002; // só texto, sem pesquisa, com um tecto de pensamento
 
-/* ── O modelo da RECOMENDAÇÃO ──
-   Ler a fotografia de uma carta não é trabalho para o lite (vai o `flash`
-   primeiro, pela `candidatosModelo`). Escolher entre factos já arrumados é:
-   o que faz a recomendação acertar são as castas, a harmonização e a nota
-   que o catálogo já tem, não o tamanho do modelo. Se o lite falhar, cai-se
-   nos outros — trocar de modelo não pode ser um caminho novo para ficar
-   sem recomendação. */
+/* ── O modelo de REDE da recomendação ──
+   A recomendação vai primeiro ao modelo que leu a carta, com um tecto de
+   pensamento (ver `recomendar`); o lite é só a rede. Chegou a ser o
+   contrário — o lite primeiro, sem pensar —, e foi ele que pôs à frente o
+   único vinho sem nota de uma carta com três bem avaliados. */
 const MODELO_LEVE = Deno.env.get("GEMINI_CHEAP_MODEL") || "gemini-flash-lite-latest";
 
 /* ── CATÁLOGO PARTILHADO (schema `winecatalog`) ──
@@ -445,17 +443,23 @@ function avaliarPreco(precoCarta: number | null, precoMercado: number | null): R
    mexeres no prompt ou nas regras de uma, mexe na outra no MESMO dia.
 
    O desenho que torna isto "assertivo" em vez de "adivinhado":
-   · o modelo escolhe por ÍNDICE, e só entre os vinhos marcados CONHECIDO.
-     Um índice que não exista, ou que aponte para um desconhecido, é
-     deitado fora aqui — um vinho que não está na carta, ou de que não se
-     sabe nada, não pode ser recomendado nem por engano;
+   · o modelo ORDENA todos os vinhos conhecidos por ÍNDICE (`ranking`) e
+     marca os 2 ou 3 que recomenda de facto (`recomendados`). Um índice que
+     não exista, ou que aponte para um desconhecido, é deitado fora aqui —
+     um vinho que não está na carta, ou de que não se sabe nada, não pode
+     ser recomendado nem por engano;
    · o modelo devolve só a ORDEM e a frase da harmonização. A nota, o preço
-     da carta e o "barato/justo/caro" do cartão montam-se aqui, a partir
-     dos dados — nunca do texto do modelo;
+     da carta e o "barato/justo/caro" de cada cartão montam-se aqui, a
+     partir dos dados — nunca do texto do modelo;
+   · um vinho SEM nota não passa à frente de um COM nota dentro dos
+     recomendados — dito no prompt e garantido em código, a seguir. Foi o
+     que aconteceu na primeira carta a sério (24/09/2026): três vinhos com
+     boa nota no Vivino e a recomendação no único que não tinha nenhuma;
    · `pesquisar` são desconhecidos que, pela cor, região e preço, valia a
      pena pesquisar para este prato. É uma sugestão de onde gastar a
      pesquisa, não um facto: a app só os pré-selecciona. */
 const MAX_PESQUISAR = 4;
+const MAX_RANKING = 10;
 
 const promptRecomendacao = (
   vinhos: Record<string, unknown>[], prato: string, orcamento: number | null,
@@ -474,7 +478,7 @@ const promptRecomendacao = (
     const notas = (Array.isArray(k.pontuacao) ? k.pontuacao : [])
       .map((p: any) => `${p.fonte} ${p.valor}/${p.escala}`).join(", ");
     const factos = [
-      notas,
+      notas || "SEM NOTA",
       k.precoMercado != null ? `loja ~${k.precoMercado}€` : "",
       k.castas?.length ? `castas: ${k.castas.join(", ")}` : "",
       k.estilo ? `estilo: ${k.estilo}` : "",
@@ -491,22 +495,28 @@ ou DESCONHECIDO (não temos dados fiáveis sobre ele).
 ${linhas}
 
 ${prato ? `O prato a acompanhar é: "${prato}".` : "Não foi indicado nenhum prato — escolhe vinhos versáteis e bem avaliados."}
-${orcamento ? `Orçamento máximo: ${orcamento}€ por garrafa (preço na carta). Só saias dele se NENHUM vinho CONHECIDO o cumprir, e di-lo na "combinacao".` : ""}
+${orcamento ? `Orçamento máximo: ${orcamento}€ por garrafa (preço na carta). Um vinho acima do orçamento só entra nos recomendados se NENHUM conhecido o cumprir, e di-lo na "razao".` : ""}
 
 Devolve APENAS um objeto JSON com esta forma exata:
-{"sugestoes": [{"i": number, "combinacao": string}], "pesquisar": [number]}
+{"ranking": [{"i": number, "razao": string}], "recomendados": [number], "pesquisar": [number]}
 
 Regras:
-- "sugestoes": 0 a 3 vinhos, do melhor para o pior, escolhidos SÓ entre os
-  marcados CONHECIDO. Nunca escolhas um DESCONHECIDO. Se nenhum CONHECIDO
-  servir, devolve [].
-- Pesa a harmonização com o prato (corpo, acidez, taninos, castas, o que o
-  vinho diz harmonizar), depois a nota do Vivino, depois a relação entre o
-  preço na carta e o preço de loja (2 a 3 vezes é o normal num restaurante).
-  Dá prioridade a vinhos PORTUGUESES quando houver um bom.
-- "combinacao": uma a duas frases concretas sobre porque combina com o
-  prato, apoiadas nos factos dados. Não cites notas nem preços que não
-  estejam na lista, e não inventes castas nem características.
+- "ranking": TODOS os vinhos marcados CONHECIDO (até ${MAX_RANKING}), do melhor para o
+  pior para este prato. Nunca incluas um DESCONHECIDO.
+- Critérios, por esta ordem:
+  1. harmonização com o prato (corpo, acidez, taninos, castas, o que o
+     vinho diz harmonizar) — um vinho que não combina fica sempre atrás;
+  2. entre os que combinam, a NOTA: um vinho com nota alta fica à frente
+     de um com nota baixa, e um vinho "SEM NOTA" NUNCA fica à frente de um
+     que combine e tenha nota de 3.8 ou mais;
+  3. a relação entre o preço na carta e o preço de loja (2 a 3 vezes é o
+     normal num restaurante);
+  4. em igualdade, dá prioridade aos PORTUGUESES.
+- "recomendados": os 2 ou 3 primeiros do ranking que recomendarias mesmo a
+  quem está à mesa (só 1 se só um combinar; [] se nenhum combinar).
+- "razao": uma a duas frases concretas sobre porque está nessa posição
+  para este prato, apoiadas nos factos dados. Não cites notas nem preços
+  que não estejam na lista, e não inventes castas nem características.
 - "pesquisar": até ${MAX_PESQUISAR} índices de vinhos DESCONHECIDOS que, pelo tipo, região e
   preço, seriam bons candidatos para este prato${orcamento ? " e orçamento" : ""} — os que valeria a pena
   pesquisar. [] se não houver desconhecidos ou nenhum fizer sentido.
@@ -516,7 +526,7 @@ Responde só com o JSON.`;
 /* Monta o cartão de uma sugestão a partir dos DADOS (ver o bloco acima).
    A forma é a mesma que as sugestões sempre tiveram, para a app e o
    histórico continuarem a desenhá-las com o mesmo código. */
-function sugestaoDe(v: Record<string, unknown>, i: number, combinacao: string): Record<string, unknown> {
+function sugestaoDe(v: Record<string, unknown>, i: number, combinacao: string, recomendado: boolean): Record<string, unknown> {
   const k = (v.conhecido ?? {}) as any;
   return {
     i,
@@ -530,9 +540,13 @@ function sugestaoDe(v: Record<string, unknown>, i: number, combinacao: string): 
     notaAno: k.notaAno ?? null,
     precoAvaliacao: v.precoAvaliacao ?? { classificacao: "desconhecido", faixaMercado: null, comentario: "" },
     combinacao: s(combinacao, 400),
+    recomendado,
     origem: k.origem ?? null,
   };
 }
+
+const temNota = (v: Record<string, unknown>) =>
+  Array.isArray((v.conhecido as any)?.pontuacao) && (v.conhecido as any).pontuacao.length > 0;
 
 async function recomendar(
   vinhos: Record<string, unknown>[], prato: string, orcamento: number | null,
@@ -544,25 +558,25 @@ async function recomendar(
   const ctrl2 = new AbortController();
   const onAbort = () => ctrl2.abort();
   parentSignal.addEventListener("abort", onAbort);
-  const subTimer = setTimeout(() => ctrl2.abort(), 25_000);
+  const subTimer = setTimeout(() => ctrl2.abort(), 40_000);
   const texto = promptRecomendacao(vinhos, prato, orcamento);
 
-  const tentar = async (m: string): Promise<any | null> => {
+  /* Ordenar oito vinhos por harmonização E nota é raciocínio a sério, e o
+     `thinkingBudget:0` do lite fazia-o mal (foi ele que pôs o vinho sem nota
+     à frente). Vai o modelo que leu a carta, com um tecto POSITIVO de
+     pensamento — nunca ilimitado, que é o caminho para o "200 vazio". O
+     lite fica de rede. Num 400 (um modelo que recuse o `thinkingConfig`,
+     como o lite recusou o 0 em produção a 24/09/2026) repete-se sem ele. */
+  const tentar = async (m: string, pensar: number | null): Promise<any | null> => {
+    const generationConfig: Record<string, unknown> = { temperature: 0, response_mime_type: "application/json" };
+    if (pensar != null) generationConfig.thinkingConfig = { thinkingBudget: pensar };
     const r = await fetch(`${GAPI}/models/${m}:generateContent?key=${GEMINI_KEY}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       signal: ctrl2.signal,
-      body: JSON.stringify({
-        contents: [{ role: "user", parts: [{ text: texto }] }],
-        generationConfig: {
-          temperature: 0,
-          response_mime_type: "application/json",
-          // Sem pesquisa ligada aqui, por isso o thinkingBudget:0 é seguro
-          // (é com o google_search que ele dá 400).
-          thinkingConfig: { thinkingBudget: 0 },
-        },
-      }),
+      body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: texto }] }], generationConfig }),
     });
+    if (r.status === 400 && pensar != null) return await tentar(m, null);
     if (!r.ok) { out.motivo = `HTTP ${r.status} (${m})`; return null; }
     const d = await r.json();
     out.usage = somarUsage(out.usage, usageMetadata(d));
@@ -577,29 +591,46 @@ async function recomendar(
   };
 
   try {
+    const tentativas: [string, number | null][] = [[modeloPesado, 1024], [MODELO_LEVE, 0]];
     const vistos = new Set<string>();
-    const ordem = [MODELO_LEVE, modeloPesado].filter((m) => m && (vistos.has(m) ? false : vistos.add(m)));
     let j: any = null;
-    for (const m of ordem) {
-      if (ctrl2.signal.aborted) break;
-      j = await tentar(m);
+    for (const [m, pensar] of tentativas) {
+      if (!m || vistos.has(m) || ctrl2.signal.aborted) continue;
+      vistos.add(m);
+      j = await tentar(m, pensar);
       if (j) break;
     }
     if (!j) { out.falhou = true; return out; }
 
     const conhecido = (i: number) => Number.isInteger(i) && i >= 0 && i < vinhos.length && !!vinhos[i].conhecido;
-    const usados = new Set<number>();
-    for (const x of Array.isArray(j.sugestoes) ? j.sugestoes : []) {
+    const ranking: { i: number; razao: string }[] = [];
+    const vistosI = new Set<number>();
+    for (const x of Array.isArray(j.ranking) ? j.ranking : []) {
       const i = Number(x?.i);
-      if (!conhecido(i) || usados.has(i)) continue;
-      usados.add(i);
-      out.sugestoes.push(sugestaoDe(vinhos[i], i, String(x?.combinacao ?? "")));
-      if (out.sugestoes.length >= 3) break;
+      if (!conhecido(i) || vistosI.has(i)) continue;
+      vistosI.add(i);
+      ranking.push({ i, razao: String(x?.razao ?? "") });
+      if (ranking.length >= MAX_RANKING) break;
     }
+    const recs: number[] = [];
+    for (const x of Array.isArray(j.recomendados) ? j.recomendados : []) {
+      const i = Number(x);
+      if (vistosI.has(i) && !recs.includes(i)) recs.push(i);
+      if (recs.length >= 3) break;
+    }
+    if (!recs.length && ranking.length) recs.push(ranking[0].i);
+    // A trave em código: dentro dos recomendados, os que têm nota vêm à
+    // frente dos que não têm (ordem do modelo em tudo o resto).
+    recs.sort((a, b) => Number(temNota(vinhos[b])) - Number(temNota(vinhos[a])));
+    const ordem = [...recs, ...ranking.map((r) => r.i).filter((i) => !recs.includes(i))];
+    out.sugestoes = ordem.map((i) =>
+      sugestaoDe(vinhos[i], i, ranking.find((r) => r.i === i)?.razao ?? "", recs.includes(i))
+    );
+
     const pesq = new Set<number>();
     for (const x of Array.isArray(j.pesquisar) ? j.pesquisar : []) {
       const i = Number(x);
-      if (!Number.isInteger(i) || i < 0 || i >= vinhos.length || vinhos[i].conhecido) continue;
+      if (!Number.isInteger(i) || i < 0 || i >= vinhos.length || vinhos[i].conhecido || vinhos[i].naoEncontrado) continue;
       pesq.add(i);
       if (pesq.size >= MAX_PESQUISAR) break;
     }
@@ -900,10 +931,15 @@ async function processarAnalise(
     let doCatalogo = 0;
     let catalogoFalhou = false;
     if (vinhosCarta.length && !ctrl.signal.aborted) {
-      const r = await catalogoProcurarLote(
-        vinhosCarta.map((v) => ({ nome: String(v.nome), produtor: (v.produtor as string | null) ?? null, ano: v.ano as number | null })),
-        ctrl.signal,
-      );
+      const pedidos = vinhosCarta.map((v) => ({ nome: String(v.nome), produtor: (v.produtor as string | null) ?? null, ano: v.ano as number | null }));
+      /* Uma segunda tentativa antes de desistir. E se falhar mesmo, isso NÃO
+         é "não conheço nenhum" — é "não consegui perguntar", e a app tem de
+         o dizer assim (`recomendacao:'catalogo-falhou'`). Foi o que
+         aconteceu a 24/09/2026: o `procurar_lote` levava 10 s numa carta de
+         11 vinhos, o PostgREST cortava-o aos 8 s, e oito vinhos acabados de
+         pesquisar e pagar apareceram como desconhecidos. */
+      let r = await catalogoProcurarLote(pedidos, ctrl.signal);
+      if (r.falhou && !ctrl.signal.aborted) r = await catalogoProcurarLote(pedidos, ctrl.signal);
       catalogoFalhou = r.falhou;
       vinhosCarta.forEach((v, i) => {
         const k = conhecimentoDoCatalogo(r.lista[i]);
@@ -925,6 +961,7 @@ async function processarAnalise(
       if (rec.modelo || rec.usage) chamadas++;
     }
     const recomendacao = !vinhosCarta.length ? "sem-carta"
+      : catalogoFalhou ? "catalogo-falhou"
       : rec.falhou ? "falhou"
       : !doCatalogo ? "sem-conhecidos"
       : "ok";

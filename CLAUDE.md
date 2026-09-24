@@ -62,6 +62,27 @@ nota:
    aponta até 4 desconhecidos que valia a pena pesquisar (`pesquisar`) —
    a app só os PRÉ-SELECCIONA, nunca os mostra como facto.
 
+**Três correções da primeira carta a sério (24/09/2026):**
+- **A pesquisa SOMA-SE, nunca substitui.** A segunda ronda de 4 vinhos
+  apagava a primeira (`verificacao: null` no pendente) e recomendava só com
+  o que a leitura sabia: quatro vinhos pagos desapareciam. Agora a
+  `verificar-vinhos` lê a `verificacao` anterior, junta-a à carta, pergunta
+  outra vez ao catálogo pela carta TODA (o que a leitura não conseguiu
+  perguntar também conta) e grava a soma das rondas.
+- **Ordenar, não escolher um.** A `recomendar` devolve o `ranking` de todos
+  os conhecidos e marca 2–3 `recomendados`; a app mostra-os como caixa
+  resumo (`wsSugDetHTML`, um `<details>` por vinho, só o primeiro aberto).
+  Um vinho sem nota não passa à frente de um com nota — no prompt e, dentro
+  dos recomendados, em código: a primeira carta recomendou o único vinho
+  sem nota de quatro. A recomendação passou para o modelo que leu a carta
+  com um tecto de pensamento (1024); o lite com `thinkingBudget:0` dava 400
+  e, quando respondia, escolhia mal.
+- **"Não consegui perguntar" não é "não conheço".** Se o `procurar_lote`
+  falhar (tenta duas vezes), `recomendacao:'catalogo-falhou'` e a app di-lo
+  — nunca "não conheço nenhum". A causa desse dia estava no SQL (a `achar`
+  levava ~1 s por vinho; ver o `CLAUDE.md` da WineCatalog), mas a app não
+  pode voltar a transformar uma avaria em "sem dados".
+
 A pesquisa paga passou a acontecer só quando alguém a pede, só para os
 vinhos que escolheu, e só UMA vez por vinho em todo o projeto: a
 `verificar-vinhos` grava no catálogo, e a próxima carta com aquele vinho —
@@ -372,11 +393,11 @@ A forma de `resultado` (a coluna jsonb, dentro da linha de `analises`),
 **versão 2**:
 ```
 { versao:2, prato, orcamento,
-  recomendacao:'ok'|'sem-conhecidos'|'falhou'|'sem-carta',
+  recomendacao:'ok'|'sem-conhecidos'|'falhou'|'catalogo-falhou'|'sem-carta',
   sugestoes:[{i,nome,produtor,tipo,regiao,casta,precoCarta,
     pontuacao:[{fonte,valor,escala,url}], notaAno,
     precoAvaliacao:{classificacao,faixaMercado,comentario}, combinacao,
-    origem:'catalogo'|'pesquisa'}],
+    recomendado, origem:'catalogo'|'pesquisa'}],   // o ranking, recomendados primeiro
   pesquisar:[i,…],
   vinhosCarta:[{nome,produtor,ano,tipo,regiao,preco,
     conhecido:null|{nota,notaUrl,notaAno,pontuacao,precoMercado,castas,
