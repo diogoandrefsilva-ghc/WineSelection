@@ -391,6 +391,27 @@ quando e olha para os dois schemas, não só para aquele em que estás.
 O `sync_log` das duas apps é o sítio onde isso se confirma — compara a
 última chamada de cada uma antes de assumir que a que está calada está bem.
 
+## As marcas dos amigos (25/09/2026)
+Cada vinho da carta (e cada sugestão) pode levar pastilhas: 🍾 está na
+garrafeira de um amigo · ⭐ um amigo bebeu-o e deu-lhe nota · 💭 está na
+wishlist de um amigo · 🎁 já foi prenda de anos. Tocar numa diz o
+pormenor num toast (um `title` não abre com o dedo); dentro de uma
+sugestão, o toque não abre nem fecha o `<details>`.
+- **Quem responde é a `winecatalog.marcas_amigos`** (`db/amigos.sql` no
+  repo WineCatalog — a secção canónica está no `CLAUDE.md` de lá). A app
+  (`wsCarregarMarcas`) manda o nome/produtor/ano lidos na carta, com o JWT
+  de quem está à mesa e `Accept-Profile: winecatalog`, e redesenha quando a
+  resposta chega. Quem decide que é "o mesmo vinho" é o SQL — nada de
+  comparar nomes aqui.
+- **Os amigos são o grupo das Prendas de Anos, e é fechado**: quem não está
+  lá recebe `null` e não vê marca nenhuma. O portão é do servidor; a app
+  nem sabe quem é do grupo.
+- **Não entra no `resultado`**: pergunta-se sempre que uma análise se
+  desenha (`_wsMarcas`, só em memória), por isso o histórico mostra o que
+  os amigos têm hoje. Não mexe no contrato abaixo, nem nas Edge Functions,
+  nem na recomendação — é informação para quem escolhe, não um critério.
+- Se falhar, a carta aparece sem marcas. Nunca pode estragar a carta.
+
 ## Contrato do pedido e da resposta (o que `app.js` envia/espera)
 Pedido: `POST /functions/v1/sugerir-vinho` com
 `{imagens:[{data,mime}], prato, orcamento}` — `orcamento` é o preço máximo

@@ -200,6 +200,14 @@ a.pont-badge:active{opacity:.7}
    nome comprido de produtor não pode atropelar o do vinho. */
 .carta-sub{display:block;color:var(--mu);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .carta-check-vazio{width:16px;height:16px}
+/* As marcas dos amigos (🍾 ⭐ 💭 🎁): pastilhas pequenas por baixo do nome,
+   em tom de papel e não douradas — o dourado é a nota do Vivino, e "o
+   Barrona tem este" não distingue o vinho, diz quem o conhece. Quebram
+   linha (ao contrário do `.carta-sub`): cortar "🍾 Barrona" a meio não
+   diz nada a ninguém. */
+.carta-amigos{display:flex;flex-wrap:wrap;gap:4px;margin-top:3px;white-space:normal}
+.am-chip{font-size:10.5px;line-height:1.5;color:var(--wine);background:rgba(107,18,48,.06);border:1px solid rgba(107,18,48,.12);border-radius:10px;padding:0 7px;cursor:pointer;white-space:nowrap}
+.am-legenda{margin:-4px 0 10px;font-size:11px}
 .carta-memoria{font-size:11px;cursor:help}
 .btn-profunda{border-color:var(--gold)}
 /* O "barato/justo/caro" é uma CONTA (preço da carta ÷ preço de loja), feita
