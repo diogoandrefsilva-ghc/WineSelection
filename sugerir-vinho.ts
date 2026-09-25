@@ -369,6 +369,20 @@ function anoDoNome(nome: string): number | null {
   return n >= 1900 && n <= new Date().getFullYear() + 2 ? n : null;
 }
 
+/* O link do Vivino só no formato que o Vivino usa: `/<nome>/w/<nº>`, limpo
+   de país, língua e ?year=. `/Wines/<nome>` e afins são o que um modelo
+   escreve de memória — nunca existiram e partem ao abrir (25/09/2026).
+   A MESMA regra da `catalogo-info`/`vinho-info` — ver o CLAUDE.md da
+   WineCatalog, "Links do Vivino". */
+function vivinoLink(u: unknown): string {
+  try {
+    const url = new URL(String(u ?? "").trim());
+    if (!/(^|\.)vivino\.com$/i.test(url.hostname)) return "";
+    const m = url.pathname.match(/\/([a-z0-9-]+)\/w\/(\d+)/i);
+    return m ? `https://www.vivino.com/${m[1].toLowerCase()}/w/${m[2]}` : "";
+  } catch { return ""; }
+}
+
 /* O que do catálogo interessa À MESA, numa forma só — é a mesma que a
    `verificar-vinhos` produz depois de pesquisar (com `origem:'pesquisa'`),
    e a app desenha as duas da mesma maneira.
@@ -384,7 +398,9 @@ function conhecimentoDoCatalogo(c: Conhecido | null): Record<string, unknown> | 
   const nota = numOrNull(f.vivino_nota, 0, 5);
   const u = f.vivino_url;
   const castas = Array.isArray(f.castas) ? f.castas.map((x: unknown) => s(x, 40)).filter(Boolean).slice(0, 8) : [];
-  const notaUrl = (nota != null && typeof u === "string" && /^https?:\/\//i.test(u)) ? u.slice(0, 300) : null;
+  // Só um link do Vivino no formato certo (`vivinoLink`): o catálogo ainda
+  // guarda links inventados de memória, que não abrem.
+  const notaUrl = nota != null ? vivinoLink(u) || null : null;
   const out: Record<string, unknown> = {
     nota,
     notaUrl,
