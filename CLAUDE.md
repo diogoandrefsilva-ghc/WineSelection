@@ -245,8 +245,13 @@ app pré-selecciona os que a recomendação apontou em `pesquisar`.
   aprendeu no treino. Para toda a gente fica assim. Cada vinho pesquisado
   leva `pesquisaWeb`; ao admin (`ADMIN_EMAIL`, confirmado também na
   função) os de memória aparecem com 🧠 e há o botão **🔬 Pesquisa
-  profunda**, que manda `profunda:true`: o prompt exige a pesquisa, uma
-  resposta sem ela passa ao modelo seguinte, e pesquisa os escolhidos
+  profunda**, que manda `profunda:true`. Desde 25/09/2026 a profunda é
+  **Serper, não grounding** (não há parâmetro na API que obrigue o Gemini a
+  pesquisar, e o prompt "exigente" respondeu de memória na mesma): a função
+  faz duas consultas ao Google por vinho (geral + Vivino) e o Gemini só lê
+  os resultados, sem `google_search`. Se o Serper não trouxer nada, fecha em
+  erro sem chamar o Gemini. Chave `SEARCH_API_KEY` (segredo do projeto
+  Supabase). Pesquisa os escolhidos
   TODOS (mesmo os que o catálogo já tinha completos — podem ter lá chegado
   de memória). As fontes, quando as há, vão para o catálogo. Mesmo
   critério nas quatro apps — ver o `CLAUDE.md` da WineCatalog, "De memória

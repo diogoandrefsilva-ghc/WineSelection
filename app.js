@@ -526,8 +526,10 @@ function wsPesquisavel(v){
    O Gemini decide sozinho se usa a pesquisa Google, e muitas vezes responde
    com o que aprendeu no treino. Para toda a gente isto fica como está (é
    barato e costuma acertar); ao admin, os vinhos que voltaram SEM pesquisa
-   levam 🧠 e há um botão para os pesquisar outra vez obrigando à pesquisa
-   (`profunda`). A Edge Function volta a confirmar que é o admin. */
+   levam 🧠 e há um botão para os pesquisar outra vez com a pesquisa
+   GARANTIDA (`profunda`): a Edge Function pesquisa ela própria no Google
+   (Serper) e o Gemini só lê os resultados. A função volta a confirmar que
+   é o admin. */
 function wsDeMemoria(v){
   return !!v&&v.pesquisaWeb===false;
 }
@@ -743,7 +745,7 @@ async function wsVerificar(analiseId,profunda){
   }
   if(!indices.length)return;
   wsVerifBotoes(analiseId,true);
-  wsVerifStatus(analiseId,profunda?'Pesquisa profunda — a obrigar o Gemini a pesquisar no Google…':'A pesquisar a sério — pode demorar um pouco…');
+  wsVerifStatus(analiseId,profunda?'Pesquisa profunda — a pesquisar no Google…':'A pesquisar a sério — pode demorar um pouco…');
   try{
     const r=await sbFetch(`${SB_URL}/functions/v1/verificar-vinhos`,{
       method:'POST',
