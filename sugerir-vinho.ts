@@ -346,12 +346,14 @@ function normConhecido(d: any): Conhecido | null {
    chamada cara ao Gemini por quarenta baratas — e essa troca faz-se uma vez
    só, aqui. A ordem da resposta é a do pedido, com `null` onde não se sabe. */
 async function catalogoProcurarLote(
-  pedidos: { nome: string; produtor: string | null; ano: number | null }[], signal?: AbortSignal,
+  pedidos: { nome: string; produtor: string | null; ano: number | null; tipo?: string | null }[], signal?: AbortSignal,
 ): Promise<{ lista: (Conhecido | null)[]; falhou: boolean }> {
   if (!pedidos.length) return { lista: [], falhou: false };
   try {
     const d = await catalogoRpc("procurar_lote", {
-      p_pedidos: pedidos.map((p) => ({ nome: p.nome, produtor: p.produtor || "", ano: p.ano })),
+      // a cor (quando a carta a diz) separa o branco do tinto; sem ela, o
+      // catálogo usa o coringa
+      p_pedidos: pedidos.map((p) => ({ nome: p.nome, produtor: p.produtor || "", ano: p.ano, tipo: p.tipo || null })),
       p_idade_dias: CATALOGO_IDADE_DIAS,
     }, signal);
     if (!Array.isArray(d)) return { lista: pedidos.map(() => null), falhou: true };
@@ -947,7 +949,7 @@ async function processarAnalise(
     let doCatalogo = 0;
     let catalogoFalhou = false;
     if (vinhosCarta.length && !ctrl.signal.aborted) {
-      const pedidos = vinhosCarta.map((v) => ({ nome: String(v.nome), produtor: (v.produtor as string | null) ?? null, ano: v.ano as number | null }));
+      const pedidos = vinhosCarta.map((v) => ({ nome: String(v.nome), produtor: (v.produtor as string | null) ?? null, ano: v.ano as number | null, tipo: (v.tipo as string | null) ?? null }));
       /* Uma segunda tentativa antes de desistir. E se falhar mesmo, isso NÃO
          é "não conheço nenhum" — é "não consegui perguntar", e a app tem de
          o dizer assim (`recomendacao:'catalogo-falhou'`). Foi o que

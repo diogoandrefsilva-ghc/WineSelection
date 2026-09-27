@@ -439,12 +439,14 @@ function normConhecido(d: any): Conhecido | null {
    chamada cara ao Gemini por quarenta baratas — e essa troca faz-se uma vez
    só, aqui. A ordem da resposta é a do pedido, com `null` onde não se sabe. */
 async function catalogoProcurarLote(
-  pedidos: { nome: string; produtor: string | null; ano: number | null }[], signal?: AbortSignal,
+  pedidos: { nome: string; produtor: string | null; ano: number | null; tipo?: string | null }[], signal?: AbortSignal,
 ): Promise<{ lista: (Conhecido | null)[]; falhou: boolean }> {
   if (!pedidos.length) return { lista: [], falhou: false };
   try {
     const d = await catalogoRpc("procurar_lote", {
-      p_pedidos: pedidos.map((p) => ({ nome: p.nome, produtor: p.produtor || "", ano: p.ano })),
+      // a cor (quando a carta a diz) separa o branco do tinto; sem ela, o
+      // catálogo usa o coringa
+      p_pedidos: pedidos.map((p) => ({ nome: p.nome, produtor: p.produtor || "", ano: p.ano, tipo: p.tipo || null })),
       p_idade_dias: CATALOGO_IDADE_DIAS,
     }, signal);
     if (!Array.isArray(d)) return { lista: pedidos.map(() => null), falhou: true };
@@ -973,7 +975,7 @@ async function processarVerificacao(
        mercado) respondem daqui; ao Gemini vão só os que sobram. */
     const semDados = carta.map((_, i) => i).filter((i) => !carta[i].conhecido);
     const cat = await catalogoProcurarLote(
-      semDados.map((i) => ({ nome: String(carta[i].nome), produtor: (carta[i].produtor as string | null) ?? null, ano: carta[i].ano as number | null })),
+      semDados.map((i) => ({ nome: String(carta[i].nome), produtor: (carta[i].produtor as string | null) ?? null, ano: carta[i].ano as number | null, tipo: (carta[i].tipo as string | null) ?? null })),
       ctrl.signal,
     );
     const doCatalogo = new Set<number>();
