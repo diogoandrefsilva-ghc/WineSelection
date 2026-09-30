@@ -30,6 +30,19 @@ isolado: `wineselection`.
   descartável (encoder PNG à mão, sem dependências); não há fonte vetorial
   guardada no repo. Para os refazer/alterar, escreve outro script assim.
 
+## A página mudou-se para a Garrafeira (30/09/2026)
+O dono das apps: "dentro da componente de Catálogo da garrafeira, queria
+igualmente transpôr a WineSelection … teríamos um separador de Sugestões,
+onde importaríamos aquela página da WineSelection (que depois
+descontinuarei)". A página "Sugerir" (e as cartas anteriores) vive agora
+também no separador **Sugestões** do Catálogo da Garrafeira (repo
+Garrafeira, secção "SUGESTÕES" do `app.js`), com as MESMAS Edge Functions e
+o MESMO schema: a análise continua em `wineselection.analises`. Quem lá a usa
+é quem tem IA na Garrafeira — daí a segunda metade da `is_allowed()` (ver
+"Login e permissões"). Esta app continua a funcionar até ser desligada; as
+Edge Functions e o `db/` continuam a ser daqui. **Mexer no contrato do
+`resultado` é mexer também no `app.js` da Garrafeira.**
+
 ## O que a app faz, em duas frases
 Upload/foto da carta → a Edge Function `sugerir-vinho` lê a imagem com o
 Gemini (só visão, **sem** pesquisa), pergunta ao catálogo partilhado o que já
@@ -115,6 +128,12 @@ no MESMO dia.
 - **Sem conceito de "amigo"/perfil** (ao contrário do Goals) — um login
   autorizado já é tudo o que é preciso para usar a app; não há ligação a
   outra entidade.
+- **`wineselection.is_allowed()` deixa entrar também quem tem IA na
+  Garrafeira** (`garrafeira.plano_ia()` 'gratis'/'premium', 30/09/2026): é
+  quem usa as Sugestões no Catálogo de lá. É a ÚNICA regra: a policy
+  `analises_ins` usa-a, e as duas Edge Functions perguntam-lhe (RPC com o JWT
+  de quem chamou). Quando esta app for desligada, a metade do
+  `allowed_users` pode sair.
 - **Todos os utilizadores aprovados podem usar a funcionalidade principal**
   (não é admin-only) — só o painel "Utilizadores" (aprovar pedidos, gerar
   password temporária) é que é admin-only.
@@ -167,9 +186,9 @@ telefone, a pessoa troca-a em Definições. Ver `db/admin_pass_temp.sql`.
   pedido. Uma pesquisa servida só pelo catálogo regista a parte da
   pesquisa a 0.
 - **Autorização**: verifica o JWT (`verify_jwt` ligado no deploy) e depois
-  confirma que o email consta de `wineselection.allowed_users` — qualquer
-  utilizador aprovado pode chamar (ao contrário da `calendario-sporting`,
-  que é só para o admin).
+  pergunta à `wineselection.is_allowed()` com esse JWT (`emailAutorizado`,
+  igual nas duas funções) — os aprovados aqui e quem tem IA na Garrafeira
+  (ao contrário da `calendario-sporting`, que é só para o admin).
 - **Diagnóstico**: cada chamada deixa uma linha em `wineselection.sync_log`
   (pedido/ok/erro, com o modelo, se houve pesquisa Google, e o erro exacto
   do Gemini) — do lado do browser vê-se sempre "502"/"504" genérico, a causa

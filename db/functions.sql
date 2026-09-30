@@ -20,12 +20,21 @@ AS $$
   SELECT auth.email() = 'diogo.andre.f.silva@gmail.com';
 $$;
 
--- Utilizador tem acesso? (email consta em allowed_users)
+-- Utilizador tem acesso? (email consta em allowed_users — OU tem IA na
+-- Garrafeira). A segunda metade é de 30/09/2026: as Sugestões passaram a
+-- viver no Catálogo da Garrafeira (o separador "Sugestões", repo Garrafeira,
+-- "SUGESTÕES" no app.js), e quem as usa lá é quem tem IA lá
+-- (`garrafeira.plano_ia()`: 'gratis' ou 'premium'; o admin é sempre
+-- 'premium'). As duas Edge Functions perguntam AQUI (RPC com o JWT de quem
+-- chamou), e a policy `analises_ins` também: a regra vive num sítio só.
+-- `plano_ia()` é SECURITY DEFINER e está aberta a PUBLIC; sem sessão devolve
+-- 'sem_ia'. Quando esta app for desligada, a primeira metade pode sair.
 CREATE OR REPLACE FUNCTION wineselection.is_allowed()
   RETURNS boolean LANGUAGE sql STABLE
   SET search_path TO 'wineselection', 'public'
 AS $$
-  SELECT auth.email() IN (SELECT email FROM wineselection.allowed_users);
+  SELECT COALESCE(auth.email() IN (SELECT email FROM wineselection.allowed_users), false)
+      OR COALESCE(garrafeira.plano_ia() IN ('gratis', 'premium'), false);
 $$;
 
 -- ---------------------------------------------------------------------

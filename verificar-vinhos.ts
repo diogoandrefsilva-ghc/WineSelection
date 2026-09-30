@@ -767,20 +767,23 @@ async function emailAutorizado(auth: string, signal: AbortSignal): Promise<{ ok:
   const uj = await u.json();
   const email = String(uj.email ?? "").toLowerCase();
   if (!email) return { ok: false, email: null };
-  const r = await fetch(
-    `${SB_URL}/rest/v1/allowed_users?email=eq.${encodeURIComponent(email)}&select=email`,
-    {
-      headers: {
-        apikey: SB_SRV,
-        Authorization: `Bearer ${SB_SRV}`,
-        "Accept-Profile": "wineselection",
-      },
-      signal,
+  // Quem pode é o que a `wineselection.is_allowed()` disser, perguntado com o
+  // JWT de quem chamou: os aprovados aqui E quem tem IA na Garrafeira (as
+  // Sugestões vivem lá desde 30/09/2026 — ver `db/functions.sql`). Uma regra
+  // só, a mesma da policy `analises_ins`.
+  const r = await fetch(`${SB_URL}/rest/v1/rpc/is_allowed`, {
+    method: "POST",
+    headers: {
+      apikey: SB_SRV,
+      Authorization: auth,
+      "Content-Type": "application/json",
+      "Content-Profile": "wineselection",
     },
-  );
+    body: "{}",
+    signal,
+  });
   if (!r.ok) return { ok: false, email };
-  const rows = await r.json();
-  return { ok: Array.isArray(rows) && rows.length > 0, email };
+  return { ok: (await r.json().catch(() => false)) === true, email };
 }
 
 async function registar(estado: string, detalhe: Record<string, unknown>, quem: string | null): Promise<void> {
